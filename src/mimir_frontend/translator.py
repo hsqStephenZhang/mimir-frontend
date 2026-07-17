@@ -128,6 +128,7 @@ class FXGraphTranslator:
 
         # Reductions
         m[torch.sum] = self._wrap_reduction(self.ops.sum)
+        m["sum"] = self._wrap_reduction(self.ops.sum)
         m["aten.sum.default"] = self._wrap_reduction(self.ops.sum)
         m["aten.sum.dim_IntList"] = self._wrap_reduction(self.ops.sum)
         m[torch.amax] = self._wrap_reduction(self.ops.amax)
@@ -136,6 +137,7 @@ class FXGraphTranslator:
         m["aten.max.default"] = self._wrap_max()
         m["aten.max.dim"] = self._wrap_max()
         m[torch.mean] = self._wrap_reduction(self.ops.mean)
+        m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
         m[torch.var_mean] = self._wrap_var_mean()

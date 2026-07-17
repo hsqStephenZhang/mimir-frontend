@@ -27,6 +27,37 @@ mim = { path = "MimIR/build/mim_py_stage/main" }
 ```
 
 After editing MimIR locally, rebuild and resync with the same command.
+The build type defaults to `Release`; set `MIMIR_BUILD_TYPE=Debug` for a debug build
+(note that `world.optimize()` is drastically slower in debug builds).
+
+## Running Examples
+
+Each model in `models/py/` is runnable and JIT-compiles itself through the
+`"mimir"` `torch.compile` backend, checking the result against eager PyTorch:
+
+```bash
+uv run --no-sync python models/py/mlp.py
+```
+
+The same files also serve as declarative export specs: `export_to_mim` is
+consumed by `scripts/export_models_to_mimir.py` to write `.mim` files into
+`models/mim/`.
+
+To use the backend on your own model:
+
+```python
+import torch
+import mimir_frontend.backend  # registers the "mimir" backend
+
+compiled = torch.compile(model, backend="mimir")
+# pass options={"debug_dir": "dbg/"} to keep the pre/post-optimize
+# MimIR dumps and the emitted .ll/.so per compiled graph
+```
+
+Compiled graphs are cached in `~/.cache/mimir-frontend/jit` keyed by the FX
+graph, input shapes, and a fingerprint of the MimIR installation (rebuilding
+MimIR invalidates the cache). Override the location with `MIMIR_CACHE_DIR` or
+`options={"cache_dir": ...}`; disable with `options={"cache": False}`.
 
 ## Running Tests
 

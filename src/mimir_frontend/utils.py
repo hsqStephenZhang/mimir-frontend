@@ -251,26 +251,18 @@ def _define_compile_lam(world: mim.World, phase: mim.Def) -> mim.Def:
     return compile_lam
 
 
-def model_to_mimir(
+def build_model_function(
+    world: mim.World,
     model: torch.nn.Module | fx.GraphModule,
     input_shapes: Sequence[Shape] | None,
     *,
-    compile_phase: str = "high_level",
     name: str = "mimir_module",
-    max_depth: int = 100,
-) -> str:
-    """Translate a torch FX model to a closed MimIR module function.
+) -> mim.Def:
+    """Translate a torch FX model into an externalized MimIR function in `world`.
 
     `input_shapes` can contain `None` or `str` for dynamic/symbolic dimensions.
-    Module parameters are automatically added as function arguments.
+    Module parameters (get_attr nodes) are appended as trailing function arguments.
     """
-
-    if compile_phase not in {"high_level", "default"}:
-        raise ValueError("compile_phase must be 'high_level' or 'default'")
-
-    driver = _make_driver(compile_phase)
-    world = driver.world()
-    
     if isinstance(model, fx.GraphModule):
         traced = model
     else:
@@ -331,11 +323,30 @@ def model_to_mimir(
     
     # 3. Create the real Module Function
     # Translate the entire FX graph into a closed `lam extern`
-    result_lam = translator.translate_as_function(graph, full_dom_types, name=name, sym_names=sym_names)
+    return translator.translate_as_function(graph, full_dom_types, name=name, sym_names=sym_names)
 
 
+def model_to_mimir(
+    model: torch.nn.Module | fx.GraphModule,
+    input_shapes: Sequence[Shape] | None,
+    *,
+    compile_phase: str = "high_level",
+    name: str = "mimir_module",
+    max_depth: int = 100,
+) -> str:
+    """Translate a torch FX model to a closed MimIR module function.
 
+    `input_shapes` can contain `None` or `str` for dynamic/symbolic dimensions.
+    Module parameters are automatically added as function arguments.
+    """
 
+    if compile_phase not in {"high_level", "default"}:
+        raise ValueError("compile_phase must be 'high_level' or 'default'")
+
+    driver = _make_driver(compile_phase)
+    world = driver.world()
+
+    result_lam = build_model_function(world, model, input_shapes, name=name)
 
     if compile_phase == "default":
         compile_lam = _define_compile_lam(world, _default_compile_phase(world))

@@ -1,7 +1,8 @@
+import os
+
 import torch
 
-from mimir_frontend.model_export import export
-
+import mimir_frontend.backend
 
 class ClassicMLP(torch.nn.Module):
     def __init__(self):
@@ -11,10 +12,15 @@ class ClassicMLP(torch.nn.Module):
         self.w1 = torch.nn.Parameter(torch.randn(32, 8))
         self.b1 = torch.nn.Parameter(torch.randn(8))
 
+    @torch.compile(backend="mimir", options={"debug_dir": f"{os.path.dirname(os.path.realpath(__file__))}/../mim_debug"})
     def forward(self, x):
         x = torch.ops.aten.addmm.default(self.b0, x, self.w0)
         x = torch.ops.aten.relu.default(x)
         return torch.ops.aten.addmm.default(self.b1, x, self.w1)
 
-
-export_to_mim = export(ClassicMLP(), input_shapes=[(4, 16)], name="classic_mlp")
+if __name__ == "__main__":
+    model = ClassicMLP()
+    x = torch.randn(4, 16)
+    with torch.no_grad():
+        want = model(x)
+        print("compiled output:", want)    
