@@ -22,3 +22,9 @@ class TinyAttention(torch.nn.Module):
 
 
 export_to_mim = export(TinyAttention(), input_shapes=[(4, 8)], name="tiny_attention")
+
+
+if __name__ == "__main__":
+    from mimir_frontend.model_export import run_spec_with_mimir
+
+    run_spec_with_mimir(export_to_mim)

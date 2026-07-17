@@ -18,3 +18,9 @@ class ClassicMLP(torch.nn.Module):
 
 
 export_to_mim = export(ClassicMLP(), input_shapes=[(4, 16)], name="classic_mlp")
+
+
+if __name__ == "__main__":
+    from mimir_frontend.model_export import run_spec_with_mimir
+
+    run_spec_with_mimir(export_to_mim)
