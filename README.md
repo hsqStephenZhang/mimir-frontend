@@ -52,6 +52,8 @@ import mimir_frontend.backend  # registers the "mimir" backend
 compiled = torch.compile(model, backend="mimir")
 # pass options={"debug_dir": "dbg/"} to keep the pre/post-optimize
 # MimIR dumps and the emitted .ll/.so per compiled graph
+# pass options={"profile": "summary" | "tree" | "trace"} (or set MIMIR_PROFILE)
+# to report MimIR phase runtimes; "trace" writes chrome://tracing JSON
 ```
 
 Compiled graphs are cached in `~/.cache/mimir-frontend/jit` keyed by the FX

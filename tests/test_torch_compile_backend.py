@@ -144,6 +144,32 @@ def test_cache_can_be_disabled(tmp_path):
     assert not list(tmp_path.glob("*.so"))
 
 
+def test_profile_summary_prints_report(tmp_path, capsys):
+    model = LinearMLP()
+    x = torch.randn(4, 16)
+    with torch.no_grad():
+        compiled = torch.compile(
+            model, backend="mimir", options={"profile": "summary", "cache_dir": str(tmp_path)}
+        )
+        got = compiled(x)
+        torch.testing.assert_close(got, model(x), rtol=1e-4, atol=1e-4)
+    assert "Phase profile (flat):" in capsys.readouterr().err
+
+
+def test_profile_trace_writes_json(tmp_path):
+    model = LinearMLP()
+    x = torch.randn(4, 16)
+    with torch.no_grad():
+        compiled = torch.compile(
+            model,
+            backend="mimir",
+            options={"profile": "trace", "debug_dir": str(tmp_path), "cache_dir": str(tmp_path)},
+        )
+        compiled(x)
+    traces = list(tmp_path.glob("*_profile.json"))
+    assert traces and "traceEvents" in traces[0].read_text()
+
+
 def test_debug_dir_dumps_artifacts(tmp_path):
     model = LinearMLP()
     x = torch.randn(4, 16)

@@ -28,6 +28,13 @@ compilation artifacts in that directory, including a dump of the MimIR world
 before (`<name>_pre.mim`) and after (`<name>_post.mim`) `world.optimize()`,
 alongside the emitted `<name>.ll` and `<name>.so`.
 
+Profiling: pass ``options={"profile": "summary" | "tree" | "trace"}`` (or set
+``MIMIR_PROFILE``) to record MimIR phase runtimes during `world.optimize()`.
+`summary` and `tree` print to stderr (or to `<name>_profile.txt` under a
+`debug_dir`); `trace` writes chrome://tracing-compatible JSON to
+`<name>_profile.json` for chrome://tracing, Perfetto, or speedscope.
+Profiling (like `debug_dir`) forces a fresh compile instead of a cache hit.
+
 Caching: compiled `.so` files are reused across processes from
 ``~/.cache/mimir-frontend/jit`` (override with ``options={"cache_dir": ...}``
 or ``MIMIR_CACHE_DIR``; disable with ``options={"cache": False}``). The cache
@@ -273,10 +280,13 @@ def mimir_backend(
     """Compile a Dynamo FX graph to native code through MimIR."""
     opts = dict(options or {})
     debug_dir = opts.pop("debug_dir", None) or os.environ.get("MIMIR_DEBUG_DIR")
+    profile = opts.pop("profile", None) or os.environ.get("MIMIR_PROFILE")
     cache_enabled = opts.pop("cache", True)
     cache_dir = Path(opts.pop("cache_dir", None) or os.environ.get("MIMIR_CACHE_DIR") or _default_cache_dir())
     if opts:
         raise TypeError(f"unknown mimir backend options: {sorted(opts)}")
+    if profile is not None and profile not in ("summary", "tree", "trace"):
+        raise ValueError(f"profile must be 'summary', 'tree', or 'trace', got {profile!r}")
 
     _check_tensors(example_inputs, "input")
     if any(n.op == "get_attr" for n in gm.graph.nodes):
@@ -308,7 +318,8 @@ def mimir_backend(
     cached_so = cache_dir / f"{name}{_shared_lib_suffix()}"
 
     lib = keep_alive = None
-    if cache_enabled and not debug_dir and cached_so.exists():
+    # debug_dir and profile both require an actual compile to observe.
+    if cache_enabled and not debug_dir and not profile and cached_so.exists():
         lib = ctypes.cdll.LoadLibrary(str(cached_so))
 
     if lib is None:
@@ -322,6 +333,13 @@ def mimir_backend(
         driver = mim.Driver()
         driver.load_plugins(EXEC_PLUGINS)
         world = driver.world()
+        if profile:
+            # Phases only record spans while this flag is set (see mim Phase::run).
+            driver.flags().profile = {
+                "summary": mim.Flags.Profile.Summary,
+                "tree": mim.Flags.Profile.Tree,
+                "trace": mim.Flags.Profile.Trace,
+            }[profile]
 
         build_model_function(world, gm, input_shapes, name=name)
 
@@ -346,6 +364,20 @@ def mimir_backend(
                 built_lib = Path(jit._get_so_path()).resolve()
             finally:
                 os.chdir(old_cwd)
+
+        if profile:
+            report = {
+                "summary": driver.profiler().summary,
+                "tree": driver.profiler().tree,
+                "trace": driver.profiler().chrome_trace,
+            }[profile]()
+            if profile == "trace" or debug_dir:
+                # chrome://tracing JSON (and anything under debug_dir) goes to a file.
+                dest = build_dir / f"{name}_profile.{'json' if profile == 'trace' else 'txt'}"
+                dest.write_text(report)
+                print(f"[mimir] {name}: phase profile written to {dest}", file=sys.stderr)
+            else:
+                print(f"[mimir] {name}: phase profile\n{report}", file=sys.stderr)
 
         if cache_enabled:
             _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])
