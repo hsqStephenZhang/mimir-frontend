@@ -39,6 +39,12 @@ request always recompiles (to produce the dumps) but still refreshes the cache.
 
 Current limitations: float32 tensors only, static shapes, inference only (the
 compiled function does not participate in autograd).
+
+Platform support: developed and tested on Linux. The platform-specific pieces
+(loaded-library discovery for the cache fingerprint, the CRT `free` paired
+with the JIT'd `malloc`, shared-library suffixes, and cache locations) have
+macOS and Windows code paths, but those are untested; `mim.JIT` itself
+supports all three platforms.
 """
 
 from __future__ import annotations
@@ -47,12 +53,13 @@ import ctypes
 import hashlib
 import math
 import os
+import platform
 import shutil
 import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import lru_cache
 from pathlib import Path
 
@@ -67,7 +74,21 @@ from .utils import build_model_function
 # invocation `mim -p opt -p clos <file>.mim -p ll`.
 EXEC_PLUGINS = ["opt", "clos", "math", "tensor", "ll"]
 
-_LIBC = ctypes.CDLL(None)
+def _load_crt() -> ctypes.CDLL:
+    """The C runtime providing the `free` that matches the JIT'd code's `malloc`."""
+    if platform.system() == "Windows":
+        # clang on Windows links the universal CRT; its allocator must be
+        # paired with its own free. CDLL(None) is not supported there.
+        for crt in ("ucrtbase", "msvcrt"):
+            try:
+                return ctypes.CDLL(crt)
+            except OSError:
+                continue
+        raise OSError("no C runtime found (tried ucrtbase, msvcrt)")
+    return ctypes.CDLL(None)
+
+
+_LIBC = _load_crt()
 _LIBC.free.argtypes = [ctypes.c_void_p]
 _LIBC.free.restype = None
 
@@ -85,16 +106,56 @@ def _stat_sig(path: Path) -> str:
         return f"{path.name}:?"
 
 
+def _loaded_module_paths() -> Iterator[str]:
+    """Paths of the shared libraries loaded into this process, per platform."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open("/proc/self/maps") as maps:
+                for line in maps:
+                    if "/" in line:
+                        yield line.rsplit(maxsplit=1)[-1]
+        except OSError:
+            pass
+    elif system == "Darwin":
+        libc = ctypes.CDLL(None)
+        libc._dyld_image_count.restype = ctypes.c_uint32
+        libc._dyld_get_image_name.restype = ctypes.c_char_p
+        libc._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+        for i in range(libc._dyld_image_count()):
+            if name := libc._dyld_get_image_name(i):
+                yield os.fsdecode(name)
+    elif system == "Windows":
+        import ctypes.wintypes as wt
+
+        psapi = ctypes.WinDLL("psapi")
+        kernel32 = ctypes.WinDLL("kernel32")
+        handles = (wt.HMODULE * 1024)()
+        needed = wt.DWORD()
+        if psapi.EnumProcessModules(
+            kernel32.GetCurrentProcess(), handles, ctypes.sizeof(handles), ctypes.byref(needed)
+        ):
+            buffer = ctypes.create_unicode_buffer(32768)
+            for i in range(min(needed.value // ctypes.sizeof(wt.HMODULE), len(handles))):
+                if kernel32.GetModuleFileNameW(handles[i], buffer, len(buffer)):
+                    yield buffer.value
+
+
 def _libmim_path() -> Path | None:
-    """Locate the loaded libmim shared object (importing mim loads it)."""
-    try:
-        with open("/proc/self/maps") as maps:
-            for line in maps:
-                if "libmim." in line:
-                    return Path(line.rsplit(maxsplit=1)[-1])
-    except OSError:
-        pass
+    """Locate the loaded libmim shared library (importing mim loads it)."""
+    for entry in _loaded_module_paths():
+        name = Path(entry).name.lower()
+        # libmim.so[.x.y] / libmim.dylib on POSIX, [lib]mim.dll on Windows.
+        if name.startswith("libmim.") or name in ("mim.dll", "libmim.dll"):
+            return Path(entry)
     return None
+
+
+def _shared_lib_suffix() -> str:
+    system = platform.system()
+    if system == "Windows":
+        return ".dll"
+    return ".dylib" if system == "Darwin" else ".so"
 
 
 @lru_cache(maxsize=1)
@@ -142,20 +203,31 @@ def _cache_key(gm: fx.GraphModule, input_shapes) -> str:
 
 
 def _default_cache_dir() -> Path:
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
+    system = platform.system()
+    if system == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif system == "Darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        xdg = os.environ.get("XDG_CACHE_HOME")
+        base = Path(xdg) if xdg else Path.home() / ".cache"
     return base / "mimir-frontend" / "jit"
 
 
-def _cache_store(cache_dir: Path, build_dir: Path, name: str) -> None:
+def _cache_store(cache_dir: Path, sources: list[Path]) -> None:
     """Atomically publish the compiled artifacts into the cache."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in (".so", ".ll"):
-        src = build_dir / f"{name}{suffix}"
-        if src.exists():
-            tmp = cache_dir / f".{name}{suffix}.{uuid.uuid4().hex}"
-            shutil.copy(src, tmp)
-            os.replace(tmp, cache_dir / f"{name}{suffix}")
+    for src in sources:
+        if not src.exists():
+            continue
+        tmp = cache_dir / f".{src.name}.{uuid.uuid4().hex}"
+        shutil.copy(src, tmp)
+        try:
+            os.replace(tmp, cache_dir / src.name)
+        except OSError:
+            # Windows refuses to replace a library another process holds open;
+            # drop this update, the existing entry stays valid.
+            tmp.unlink(missing_ok=True)
 
 
 def _check_tensors(tensors, what: str) -> None:
@@ -231,9 +303,9 @@ def mimir_backend(
     _pack_outputs(gm, out_shapes)
 
     # The key covers the packed graph, input shapes, and the MimIR install;
-    # it also names the exported symbol, so cached .so files are self-contained.
+    # it also names the exported symbol, so cached libraries are self-contained.
     name = f"mimir_graph_{_cache_key(gm, input_shapes)}"
-    cached_so = cache_dir / f"{name}.so"
+    cached_so = cache_dir / f"{name}{_shared_lib_suffix()}"
 
     lib = keep_alive = None
     if cache_enabled and not debug_dir and cached_so.exists():
@@ -267,12 +339,16 @@ def mimir_backend(
                 if debug_dir:
                     world.set(f"{name}_post")
                     world.write()
-                lib = mim.JIT(name, [name]).compile_and_load()
+                jit = mim.JIT(name, [name])
+                lib = jit.compile_and_load()
+                # Resolve while still chdir'd: on POSIX the JIT builds
+                # `./<name>.so` in cwd, on Windows a DLL in a temp dir.
+                built_lib = Path(jit._get_so_path()).resolve()
             finally:
                 os.chdir(old_cwd)
 
         if cache_enabled:
-            _cache_store(cache_dir, build_dir, name)
+            _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])
         # Keep the driver/world alive as long as the callable.
         keep_alive = driver
 
