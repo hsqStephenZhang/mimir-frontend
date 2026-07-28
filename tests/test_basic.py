@@ -626,11 +626,88 @@ def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
 
     world = make_world()
     x, = make_static_inputs_with_shapes(world, [(2, 3, 8, 8)])
-    result = translate_model(Model(), [x])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(traced.graph, [x])
     ir = def_to_string(result)
 
-    assert "(2, 3, 1, 1)" in ir
-    assert "%tensor.map_reduce" in ir
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1]
+    assert "%torch.mean_dims_keepdim_op" in ir
+
+
+def test_adaptive_avg_pool2d_folded_singletons_is_identity():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
+
+    world = make_world()
+    shape = (1, 4, 1, 1)
+    input_def = make_static_inputs_with_shapes(world, [shape])[0]
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    translator.ops._remember_shape(input_def, shape)
+    result = translator.translate(traced.graph, [input_def])
+
+    assert result == input_def
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 1, 1]
+
+
+def test_functional_batch_norm_inference_translates():
+    class Model(torch.nn.Module):
+        def forward(self, x, running_mean, running_var, weight, bias):
+            return torch.nn.functional.batch_norm(
+                x, running_mean, running_var, weight, bias, training=False
+            )
+
+    world = make_world()
+    shapes = [(1, 4, 8, 8), (4,), (4,), (4,), (4,)]
+    inputs = make_static_inputs_with_shapes(
+        world, shapes
+    )
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    for input_def, shape in zip(inputs, shapes):
+        translator.ops._remember_shape(input_def, shape)
+    result = translator.translate(traced.graph, inputs)
+
+    assert tensor_shape_values(result) == [4, 8, 8]
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 8, 8]
+    assert "%torch.batch_norm_inference_op" in def_to_string(result)
+
+
+def test_aten_batch_norm_inference_translates():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias, running_mean, running_var):
+            return torch.ops.aten.batch_norm.default(
+                x, weight, bias, running_mean, running_var,
+                False, 0.1, 1e-5, True,
+            )
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 4, 8, 8), (4,), (4,), (4,), (4,)]
+    )
+    result = translate_model(Model(), inputs)
+
+    assert tensor_shape_values(result) == [2, 4, 8, 8]
+    assert "%torch.batch_norm_inference_op" in def_to_string(result)
+
+
+def test_inplace_residual_add_and_relu_translate_as_values():
+    class Model(torch.nn.Module):
+        def forward(self, x, residual):
+            x = torch.ops.aten.relu_.default(x)
+            return torch.ops.aten.add_.Tensor(x, residual)
+
+    world = make_world()
+    x, residual = make_static_inputs_with_shapes(
+        world, [(2, 4, 8, 8), (2, 4, 8, 8)]
+    )
+    result = translate_model(Model(), [x, residual])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 4, 8, 8]
+    assert_ir_contains_in_order(ir, ["%torch.relu_op", "%torch.add_op"])
 
 
 def test_convolution_batch_one_result_can_feed_next_convolution():

@@ -969,18 +969,32 @@ class OperatorLibrary:
 
         dim_list = list(dim) if isinstance(dim, (tuple, list)) else [dim]
         canonical = [d if d >= 0 else d + logical_rank for d in dim_list]
-        if any(axis not in physical_axes for axis in canonical):
-            raise NotImplementedError(
-                f"{kind} over a folded singleton axis is not implemented"
+        if (
+            not canonical
+            or any(axis < 0 or axis >= logical_rank for axis in canonical)
+            or len(set(canonical)) != len(canonical)
+        ):
+            raise ValueError(
+                f"{kind} dimensions must be non-empty, unique, and in range"
             )
-        physical_reduction_dims = [physical_axes.index(axis) for axis in canonical]
+        output_dims = self.rules.reduce_shape_spec(
+            dims, dim=canonical, keepdim=keepdim
+        ).output_dims
+        physical_reduction_dims = [
+            physical_axes.index(axis)
+            for axis in canonical
+            if axis in physical_axes
+        ]
+        # Reducing an extent-one dimension is an identity for sum, mean, and
+        # extrema. Its logical removal/retention remains visible in the cache.
+        if not physical_reduction_dims:
+            return self._remember_shape(input, output_dims)
         dim_values = [
             self.world.lit_i64(axis) for axis in physical_reduction_dims
         ]
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
-        output_dims = self.rules.reduce_shape_spec(dims, dim=canonical, keepdim=keepdim).output_dims
         if len(dim_values) == 1 and not keepdim:
             callee = self.world.annex(getattr(torch_dialect, f"{kind}_dim_op").value)
             dictionary = self.torch_floating if kind == "amax" else self.torch_arithmetic
@@ -1005,14 +1019,19 @@ class OperatorLibrary:
             callee = self.world.app(callee, dim_values[0])
             result = self.world.app(callee, input)
             return self._remember_shape(result, output_dims)
-        if keepdim and len(dim_values) == 1:
-            name = f"{kind}_dims_keepdim_op"
-        else:
-            name = f"{kind}_dims_op"
-        if keepdim and len(dim_values) != 1:
-            raise NotImplementedError("multi-axis keepdim is not yet emitted by the frontend")
+        name = (
+            f"{kind}_dims_keepdim_op"
+            if keepdim
+            else f"{kind}_dims_op"
+        )
+        if keepdim and kind == "amax":
+            raise NotImplementedError("multi-axis amax keepdim is not implemented")
         callee = self.world.annex(getattr(torch_dialect, name).value)
-        dictionary = self.torch_floating if kind == "amax" else self.torch_arithmetic
+        dictionary = (
+            self.torch_floating
+            if kind in ("amax", "mean")
+            else self.torch_arithmetic
+        )
         callee = self.world.app(callee, dictionary)
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
         callee = self.world.app(callee, dim_tuple)
@@ -1205,6 +1224,58 @@ class OperatorLibrary:
         result = self.world.app(callee, optional_bias)
         output_dims = batch_dims + [out_features]
         return self._remember_shape(result, output_dims)
+
+    def batch_norm_inference(
+        self, input, running_mean, running_var, weight=None, bias=None, eps=1e-5
+    ):
+        dims = self.shape_of(input)
+        if len(dims) < 2:
+            raise NotImplementedError("batch_norm expects input rank >= 2")
+        channels = dims[1]
+        for name, value in (
+            ("running_mean", running_mean),
+            ("running_var", running_var),
+            ("weight", weight),
+            ("bias", bias),
+        ):
+            if value is None:
+                if name.startswith("running_"):
+                    raise NotImplementedError(
+                        f"batch_norm inference requires {name}"
+                    )
+                continue
+            value_dims = self.shape_of(value)
+            if len(value_dims) != 1 or not self.rules._same_dim(
+                value_dims[0], channels
+            ):
+                raise NotImplementedError(
+                    f"batch_norm {name} must have shape [channels]"
+                )
+
+        callee = self.world.annex(torch_dialect.batch_norm_inference_op.value)
+        callee = self.world.app(callee, self.torch_floating)
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                input, optional(weight), optional(bias), running_mean,
+                running_var, self._f32_float_lit(eps),
+            ]),
+        )
+        return self._remember_shape(result, dims)
 
     def _tensor_reshape(self, x, shape):
         in_rank, in_shape_tuple = self._rank_and_shape(x)

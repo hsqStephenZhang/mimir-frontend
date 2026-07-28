@@ -25,6 +25,9 @@ mim = { path = "MimIR/build/mim_py_stage/main" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["KernelBench"]
+markers = [
+    "slow: end-to-end model tests with substantial native compilation",
+]
 
 [tool.ty.environment]
 python = ".venv"

@@ -109,6 +109,44 @@ def test_conv_matches_eager():
     check_against_eager(SmallConv(), torch.randn(2, 1, 8, 8))
 
 
+def test_batch_norm_residual_block_matches_eager():
+    class ResidualBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = torch.nn.Conv2d(4, 4, 3, padding=1, bias=False)
+            self.bn1 = torch.nn.BatchNorm2d(4)
+            self.conv2 = torch.nn.Conv2d(4, 4, 3, padding=1, bias=False)
+            self.bn2 = torch.nn.BatchNorm2d(4)
+
+        def forward(self, x):
+            identity = x
+            x = torch.relu(self.bn1(self.conv1(x)))
+            x = self.bn2(self.conv2(x))
+            x += identity
+            return torch.relu(x)
+
+    check_against_eager(
+        ResidualBlock().eval(),
+        torch.randn(1, 4, 8, 8),
+    )
+
+
+def test_batch_norm_without_affine_matches_eager():
+    check_against_eager(
+        torch.nn.BatchNorm2d(4, affine=False).eval(),
+        torch.randn(1, 4, 4, 4),
+    )
+
+
+@pytest.mark.slow
+def test_torchvision_resnet18_matches_eager():
+    torchvision = pytest.importorskip("torchvision")
+    model = torchvision.models.resnet18(weights=None).eval()
+    # A smaller static image exercises the complete architecture while
+    # keeping the loop-based reference lowering suitable for a test run.
+    check_against_eager(model, torch.randn(1, 3, 32, 32))
+
+
 def test_transformer_attention_ffn_matches_eager():
     check_against_eager(TinyAttentionFFN(), torch.randn(4, 8))
 

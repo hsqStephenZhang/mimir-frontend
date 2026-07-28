@@ -48,6 +48,9 @@ class FXGraphTranslator:
             for name in names:
                 m[name] = wrapper
 
+        m[operator.iadd] = self._wrap_binary(self.ops.add)
+        m["aten.add_.Tensor"] = self._wrap_binary(self.ops.add)
+
         m[torch.clamp] = self._wrap_clamp()
         m["aten.clamp.default"] = self._wrap_clamp()
         m["aten.clamp.Tensor"] = self._wrap_clamp()
@@ -78,6 +81,7 @@ class FXGraphTranslator:
                 m[t.__name__] = wrapper
             if name: m[name] = wrapper
         m[operator.neg] = self._wrap_unary(self.ops.neg)
+        m["aten.relu_.default"] = self._wrap_unary(self.ops.relu)
 
         # Prims
         if hasattr(torch.ops, "prims") and hasattr(torch.ops.prims, "convert_element_type"):
@@ -176,6 +180,11 @@ class FXGraphTranslator:
         m["aten.softmax.int"] = self._wrap_softmax_int()
         m[torch.nn.functional.layer_norm] = self._wrap_layer_norm()
         m["aten.native_layer_norm.default"] = self._wrap_layer_norm()
+
+        # Normalization
+        m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
+        m["batch_norm"] = self._wrap_functional_batch_norm()
+        m["aten.batch_norm.default"] = self._wrap_aten_batch_norm()
 
         # Linear Algebra
         m[torch.mm] = self._wrap_binary(self.ops.mm)
@@ -504,6 +513,42 @@ class FXGraphTranslator:
             bias = args[3] if len(args) > 3 else node.kwargs.get("bias")
             eps = args[4] if len(args) > 4 else node.kwargs.get("eps", 1e-5)
             return self.ops.native_layer_norm(input_def, normalized_shape, weight, bias, eps)
+        return convert
+
+    def _wrap_functional_batch_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            input_def = args[0]
+            running_mean = args[1] if len(args) > 1 else kwargs.get("running_mean")
+            running_var = args[2] if len(args) > 2 else kwargs.get("running_var")
+            weight = args[3] if len(args) > 3 else kwargs.get("weight")
+            bias = args[4] if len(args) > 4 else kwargs.get("bias")
+            training = args[5] if len(args) > 5 else kwargs.get("training", False)
+            eps = args[7] if len(args) > 7 else kwargs.get("eps", 1e-5)
+            if training:
+                raise NotImplementedError("batch_norm training mode is not implemented")
+            return self.ops.batch_norm_inference(
+                input_def, running_mean, running_var, weight, bias, eps
+            )
+        return convert
+
+    def _wrap_aten_batch_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            input_def = args[0]
+            weight = args[1] if len(args) > 1 else kwargs.get("weight")
+            bias = args[2] if len(args) > 2 else kwargs.get("bias")
+            running_mean = args[3] if len(args) > 3 else kwargs.get("running_mean")
+            running_var = args[4] if len(args) > 4 else kwargs.get("running_var")
+            training = args[5] if len(args) > 5 else kwargs.get("training", False)
+            eps = args[7] if len(args) > 7 else kwargs.get("eps", 1e-5)
+            if training:
+                raise NotImplementedError("batch_norm training mode is not implemented")
+            return self.ops.batch_norm_inference(
+                input_def, running_mean, running_var, weight, bias, eps
+            )
         return convert
 
     def _wrap_where(self):
