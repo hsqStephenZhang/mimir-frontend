@@ -959,15 +959,20 @@ class OperatorLibrary:
         ]
         physical_dims = [dims[axis] for axis in physical_axes]
         rank = len(physical_dims)
-        if dim is None:
-            if kind != "sum" or keepdim:
-                raise NotImplementedError(f"{kind} global keepdim is not implemented")
+        if dim is None and kind == "sum" and not keepdim:
             callee = self.world.annex(torch_dialect.sum_all_op.value)
-            callee = self._apply_grouped(callee, [self.torch_arithmetic, self._lit_nat(rank)])
+            callee = self.world.app(callee, self.torch_arithmetic)
+            callee = self._apply_grouped(
+                callee,
+                [self._lit_nat(rank), self.world.tuple(physical_dims)],
+            )
             result = self.world.app(callee, input)
             return self._remember_shape(result, [])
 
-        dim_list = list(dim) if isinstance(dim, (tuple, list)) else [dim]
+        if dim is None:
+            dim_list = list(range(logical_rank))
+        else:
+            dim_list = list(dim) if isinstance(dim, (tuple, list)) else [dim]
         canonical = [d if d >= 0 else d + logical_rank for d in dim_list]
         if (
             not canonical
@@ -997,7 +1002,11 @@ class OperatorLibrary:
         shape = self.world.tuple(physical_dims)
         if len(dim_values) == 1 and not keepdim:
             callee = self.world.annex(getattr(torch_dialect, f"{kind}_dim_op").value)
-            dictionary = self.torch_floating if kind == "amax" else self.torch_arithmetic
+            dictionary = (
+                self.torch_floating
+                if kind in ("amax", "mean")
+                else self.torch_arithmetic
+            )
             callee = self.world.app(callee, dictionary)
             callee = self._apply_grouped(callee, [self._lit_nat(rank), shape])
             callee = self.world.app(callee, dim_values[0])
@@ -1025,7 +1034,7 @@ class OperatorLibrary:
             else f"{kind}_dims_op"
         )
         if keepdim and kind == "amax":
-            raise NotImplementedError("multi-axis amax keepdim is not implemented")
+            name = "amax_dims_op"
         callee = self.world.annex(getattr(torch_dialect, name).value)
         dictionary = (
             self.torch_floating
@@ -1036,6 +1045,12 @@ class OperatorLibrary:
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
         callee = self.world.app(callee, dim_tuple)
         result = self.world.app(callee, input)
+        if keepdim and kind == "amax":
+            reduced_dims = self.rules.reduce_shape_spec(
+                dims, dim=canonical, keepdim=False
+            ).output_dims
+            self._remember_shape(result, reduced_dims)
+            return self.reshape(result, output_dims)
         return self._remember_shape(result, output_dims)
 
     def _f32_pair_reduce_lambda(self, pair_type):
@@ -1125,32 +1140,78 @@ class OperatorLibrary:
         return lam
 
     def var_mean(self, input, dim=None, keepdim=False, correction=0):
-        """
-        Translates torch.var_mean into a map-reduce operation that yields a tuple (var, mean).
-        """
-        if correction != 0:
-            raise NotImplementedError("var_mean with correction != 0 is not implemented")
-            
-        acc_type = self.world.arr(self._lit_nat(3), self.F32)
-        reduced, output_dims = self._reduce_aff(
-            input,
-            acc_type,
-            self._f32_var_mean_reduce_lambda(acc_type),
-            self.world.tuple([self._f32_float_lit(0.0), self._f32_float_lit(0.0), self._f32_float_lit(0.0)]),
-            dim=dim,
-            keepdim=keepdim,
-            return_shape=True,
+        """Emit the Torch var_mean decomposition and restore optional keepdim."""
+        dims = self.shape_of(input)
+        logical_rank = len(dims)
+        dim_list = (
+            list(range(logical_rank))
+            if dim is None
+            else list(dim) if isinstance(dim, (tuple, list)) else [dim]
         )
-        
-        rank = self._lit_nat(len(output_dims))
-        shape = self.world.tuple(output_dims)
-        
-        var_tensor = self._unary_with_types(acc_type, self.F32, self._f32_acc_to_var_mean(acc_type, extract_var=True), reduced, rank, shape)
-        self._remember_shape(var_tensor, output_dims)
-        mean_tensor = self._unary_with_types(acc_type, self.F32, self._f32_acc_to_var_mean(acc_type, extract_var=False), reduced, rank, shape)
-        self._remember_shape(mean_tensor, output_dims)
-        
-        return self.world.tuple([var_tensor, mean_tensor])
+        canonical = [d if d >= 0 else d + logical_rank for d in dim_list]
+        if (
+            not canonical
+            or any(axis < 0 or axis >= logical_rank for axis in canonical)
+            or len(set(canonical)) != len(canonical)
+        ):
+            raise ValueError(
+                "var_mean dimensions must be non-empty, unique, and in range"
+            )
+
+        physical_axes = [
+            axis for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        physical_dims = [dims[axis] for axis in physical_axes]
+        physical_reduction_dims = [
+            physical_axes.index(axis)
+            for axis in canonical
+            if axis in physical_axes
+        ]
+        if len(physical_reduction_dims) == len(physical_dims):
+            raise NotImplementedError(
+                "var_mean reduction to a rank-0 tensor is not implemented"
+            )
+        if not physical_reduction_dims:
+            raise NotImplementedError(
+                "var_mean over only folded singleton axes is not implemented"
+            )
+
+        dim_values = [
+            self.world.lit_i64(axis) for axis in physical_reduction_dims
+        ]
+        callee = self.world.annex(torch_dialect.var_mean_dims_op.value)
+        callee = self.world.app(callee, self.torch_floating)
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._lit_nat(len(physical_dims)),
+                self._lit_nat(len(dim_values)),
+                self.world.tuple(physical_dims),
+            ],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([
+                self.world.tuple(dim_values),
+                self._lit_nat(correction),
+            ]),
+        )
+        result = self.world.app(callee, input)
+        reduced_dims = self.rules.reduce_shape_spec(
+            dims, dim=canonical, keepdim=False
+        ).output_dims
+        outputs = []
+        for index in range(2):
+            output = result.proj(2, index)
+            self._remember_shape(output, reduced_dims)
+            if keepdim:
+                keep_dims = self.rules.reduce_shape_spec(
+                    dims, dim=canonical, keepdim=True
+                ).output_dims
+                output = self.reshape(output, keep_dims)
+            outputs.append(output)
+        return self.world.tuple(outputs)
 
     # Linear Algebra
     def mm(self, lhs, rhs):

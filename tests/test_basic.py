@@ -458,7 +458,7 @@ def test_addmm_decomposes_to_mm_and_add():
     result = translate_model(Model(), [bias, x, y])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.product_2d", "%torch.add_op"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.mm_op", "%torch.add_op"])
 
 
 def test_rank4_matmul_maps_directly_to_torch_matmul():
@@ -883,7 +883,7 @@ def test_avg_pool2d_translates_to_tensor_pool_and_scale():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.pool", "%tensor.unary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%tensor.pool", "%torch.mul_scalar_op"])
 
 
 def test_lenet_style_cnn_with_pooling_translates():
@@ -913,33 +913,38 @@ def test_lenet_style_cnn_with_pooling_translates():
     assert tensor_shape_values(result) == [2, 10]
     assert_ir_contains_in_order(
         def_to_string(result),
-        ["%tensor.conv", "%torch.relu_op", "%tensor.pool", "%tensor.conv", "%tensor.pool", "%torch.reshape_op", "%tensor.product_2d"],
+        ["%tensor.conv", "%torch.relu_op", "%tensor.pool", "%tensor.conv", "%tensor.pool", "%torch.reshape_op", "%torch.mm_op"],
     )
 
 
 @pytest.mark.parametrize(
-    "dim,keepdim,expected_shape",
+    "dim,keepdim,expected_shape,expected_op",
     [
-        (None, False, "((), (2, 3, 4))"),
-        (0, False, "((3, 4), (3, 4, 2))"),
-        (1, True, "((2, 1, 4), (2, 1, 4, 3))"),
-        ((1, 2), False, "(2, (2, 3, 4))"),
-        ((1, 2), True, "((2, 1, 1), (2, 1, 1, 3, 4))"),
+        (None, False, [], "%torch.sum_all_op"),
+        (0, False, [3, 4], "%torch.sum_dim_op"),
+        (1, True, [2, 1, 4], "%torch.sum_dim_keepdim_op"),
+        ((1, 2), False, [2], "%torch.sum_dims_op"),
+        ((1, 2), True, [2, 1, 1], "%torch.sum_dims_keepdim_op"),
     ],
 )
-def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape):
+def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape, expected_op):
     class Model(torch.nn.Module):
         def forward(self, x):
             return torch.sum(x, dim=dim, keepdim=keepdim)
 
     world = make_world()
-    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(
+        traced.graph, make_inputs(world, 1, "static", 3)
+    )
 
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
-    assert expected_shape in ir
+    assert [
+        dim.get_nat() for dim in translator.ops.shape_of(result)
+    ] == expected_shape
+    assert expected_op in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -954,7 +959,7 @@ def test_sum_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
 
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%tensor.map_reduce" in def_to_string(result)
+    assert "%torch.sum_" in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -970,7 +975,12 @@ def test_amax_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
     ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
+    if keepdim:
+        # amax has no dedicated keepdim axiom; it composes a non-keepdim
+        # reduction with reshape, exposing the underlying tensor reduction.
+        assert "%tensor.map_reduce" in ir
+    else:
+        assert "%torch.amax_" in ir
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -986,8 +996,7 @@ def test_mean_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
     ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
-    assert "%tensor.unary" in ir
+    assert "%torch.mean_" in ir
 
 
 @pytest.mark.parametrize(
@@ -1064,7 +1073,7 @@ def test_value_only_max(shape_kind, rank):
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
     ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
+    assert "%torch.amax_" in ir
 
 def test_tuple_max_is_unsupported():
     class Model(torch.nn.Module):
@@ -1076,7 +1085,7 @@ def test_tuple_max_is_unsupported():
         translate_model(Model(), make_inputs(world, 1, "static", 3))
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
-@pytest.mark.parametrize("rank,dim,keepdim", [(1, None, False), (1, 0, True), (3, -1, True), (3, (1, 2), True)])
+@pytest.mark.parametrize("rank,dim,keepdim", [(3, -1, True), (3, (1, 2), True)])
 def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -1087,7 +1096,28 @@ def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     assert isinstance(result, mim.Def)
     # var_mean returns a tuple of (var, mean)
     ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
+    assert "%torch.var_mean_dims_op" in ir
+    if keepdim:
+        assert "%torch.reshape_op" in ir
+
+
+@pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
+@pytest.mark.parametrize("dim,keepdim", [(None, False), (0, True)])
+def test_var_mean_rank_zero_result_is_explicitly_unsupported(
+    shape_kind, dim, keepdim
+):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.var_mean(
+                x, dim=dim, keepdim=keepdim, correction=0
+            )
+
+    world = make_world()
+    with pytest.raises(
+        NotImplementedError,
+        match="rank-0 tensor",
+    ):
+        translate_model(Model(), make_inputs(world, 1, shape_kind, 1))
 
 def test_bitwise_and_logical_not():
     class Model(torch.nn.Module):
@@ -1172,9 +1202,14 @@ def test_expand_negative_one_keeps_input_dimension():
 
     world = make_world()
     x, = make_static_inputs_with_shapes(world, [(5, 1)])
-    result = translate_model(Model(), [x])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    translator.ops._remember_shape(x, (5, 1))
+    result = translator.translate(traced.graph, [x])
 
-    assert tensor_shape_values(result) == [5, 32]
+    assert [
+        dim.get_nat() for dim in translator.ops.shape_of(result)
+    ] == [5, 32]
     assert "%torch.expand_op" in def_to_string(result)
 
 
