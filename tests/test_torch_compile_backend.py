@@ -36,6 +36,48 @@ class SmallConv(torch.nn.Module):
         return self.fc(x)
 
 
+class TinyAttentionFFN(torch.nn.Module):
+    """A transformer-style block without LayerNorm, for frontend coverage."""
+
+    def __init__(self, d=8, hidden=16):
+        super().__init__()
+        self.q = torch.nn.Linear(d, d)
+        self.k = torch.nn.Linear(d, d)
+        self.v = torch.nn.Linear(d, d)
+        self.proj = torch.nn.Linear(d, d)
+        self.ff1 = torch.nn.Linear(d, hidden)
+        self.ff2 = torch.nn.Linear(hidden, d)
+
+    def forward(self, x):
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        scores = (q @ k.transpose(-2, -1)) / (x.shape[-1] ** 0.5)
+        attention = torch.softmax(scores, dim=-1)
+        x = x + self.proj(attention @ v)
+        return x + self.ff2(torch.relu(self.ff1(x)))
+
+
+class TinyTransformerBlock(torch.nn.Module):
+    """A complete single-head transformer block with precomputed static width."""
+
+    def __init__(self, d=8, hidden=16):
+        super().__init__()
+        self.q = torch.nn.Linear(d, d)
+        self.k = torch.nn.Linear(d, d)
+        self.v = torch.nn.Linear(d, d)
+        self.proj = torch.nn.Linear(d, d)
+        self.ff1 = torch.nn.Linear(d, hidden)
+        self.ff2 = torch.nn.Linear(hidden, d)
+        self.norm1 = torch.nn.LayerNorm(d)
+        self.norm2 = torch.nn.LayerNorm(d)
+
+    def forward(self, x):
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        scores = (q @ k.transpose(-2, -1)) / (x.shape[-1] ** 0.5)
+        attention = torch.softmax(scores, dim=-1)
+        x = self.norm1(x + self.proj(attention @ v))
+        return self.norm2(x + self.ff2(torch.relu(self.ff1(x))))
+
+
 @pytest.fixture(autouse=True)
 def _reset_dynamo(monkeypatch, tmp_path_factory):
     # Hermetic per-test-run JIT cache: don't read from or pollute the user cache.
@@ -57,8 +99,58 @@ def test_linear_mlp_matches_eager():
     check_against_eager(LinearMLP(), torch.randn(4, 16))
 
 
+@pytest.mark.parametrize("shape", [(4, 8), (2, 4, 8)])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_linear_rank_and_bias_matches_eager(shape, with_bias):
+    check_against_eager(torch.nn.Linear(8, 5, bias=with_bias).eval(), torch.randn(*shape))
+
+
 def test_conv_matches_eager():
     check_against_eager(SmallConv(), torch.randn(2, 1, 8, 8))
+
+
+def test_transformer_attention_ffn_matches_eager():
+    check_against_eager(TinyAttentionFFN(), torch.randn(4, 8))
+
+
+def test_transformer_block_matches_eager():
+    check_against_eager(TinyTransformerBlock().eval(), torch.randn(2, 4, 8))
+
+
+def test_rank4_matmul_matches_eager():
+    class Rank4Matmul(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return lhs @ rhs
+
+    check_against_eager(
+        Rank4Matmul(),
+        torch.randn(2, 3, 4, 5),
+        torch.randn(2, 3, 5, 6),
+    )
+
+
+def test_layer_norm_matches_eager():
+    check_against_eager(torch.nn.LayerNorm(8).eval(), torch.randn(4, 8))
+
+
+def test_rms_norm_singleton_broadcast_matches_eager():
+    class RMSNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(16))
+
+        def forward(self, x):
+            variance = x.float().pow(2).mean(-1, keepdim=True)
+            return self.weight * (x * torch.rsqrt(variance + 1e-6))
+
+    check_against_eager(RMSNorm().eval(), torch.randn(1, 5, 16))
+
+
+def test_embedding_with_i64_indices_matches_eager():
+    check_against_eager(
+        torch.nn.Embedding(32, 16).eval(),
+        torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.int64),
+    )
 
 
 def test_registered_by_name():

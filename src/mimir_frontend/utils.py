@@ -16,6 +16,9 @@ from .translator import FXGraphTranslator
 
 Shape = Sequence[int | str | None]
 
+def _lit_nat(world: mim.World, value: int) -> mim.Def:
+    return world.lit(world.lit_nat_0().type(), value)
+
 
 class ShapeEnv:
     def __init__(self, world: mim.World):
@@ -66,10 +69,10 @@ def shape_to_mimir_dims(
     dims = []
     for dim in shape:
         if isinstance(dim, int):
-            dims.append(world.lit_nat(dim))
+            dims.append(_lit_nat(world, dim))
         elif isinstance(dim, str):
             if dim.isdecimal():
-                dims.append(world.lit_nat(int(dim)))
+                dims.append(_lit_nat(world, int(dim)))
             elif symbolic:
                 if shape_env is None:
                     raise ValueError("shape_env is required when symbolic=True")
@@ -108,9 +111,27 @@ def _infer_input_shapes_from_placeholders(graph: fx.Graph) -> list[Shape]:
     return shapes
 
 
+def _infer_input_dtypes_from_placeholders(graph: fx.Graph) -> list[torch.dtype]:
+    dtypes = []
+    for node in graph.nodes:
+        if node.op != "placeholder":
+            continue
+        value = node.meta.get("val")
+        dtypes.append(getattr(value, "dtype", torch.float32))
+    return dtypes
+
+
+def _element_type_for_dtype(ops, dtype: torch.dtype) -> mim.Def:
+    if dtype == torch.float32:
+        return ops.F32
+    if dtype == torch.int64:
+        return ops.I64
+    raise NotImplementedError(f"MimIR frontend does not support tensor dtype {dtype}")
+
+
 def _make_driver(compile_phase: str) -> mim.Driver:
     driver = mim.Driver()
-    plugins = ["math", "tensor"]
+    plugins = ["math", "tensor", "torch"]
     if compile_phase == "default":
         plugins.append("compile")
     driver.load_plugins(plugins)
@@ -214,6 +235,7 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
         [
             optimize,
             _named_phase(world, "%regex.lower_regex"),
+            _named_phase(world, "%torch.lower_torch"),
             _named_phase(world, "%tensor.lower_tensor"),
             _named_phase(world, "%tensor.fuse_tensor"),
             _named_phase(world, "%tensor.lower_to_mem"),
@@ -256,6 +278,7 @@ def build_model_function(
     model: torch.nn.Module | fx.GraphModule,
     input_shapes: Sequence[Shape] | None,
     *,
+    input_dtypes: Sequence[torch.dtype] | None = None,
     name: str = "mimir_module",
 ) -> mim.Def:
     """Translate a torch FX model into an externalized MimIR function in `world`.
@@ -272,6 +295,10 @@ def build_model_function(
 
     if input_shapes is None:
         input_shapes = _infer_input_shapes_from_placeholders(graph)
+    if input_dtypes is None:
+        input_dtypes = _infer_input_dtypes_from_placeholders(graph)
+    if len(input_dtypes) != len(input_shapes):
+        raise ValueError("input_dtypes must have one entry per input shape")
     
     # Identify parameters used in get_attr nodes
     param_nodes = [node for node in graph.nodes if node.op == "get_attr"]
@@ -302,8 +329,10 @@ def build_model_function(
     
     # Input Tensors
     tensor_input_types = []
-    for shape in normalized_input_shapes:
-        tensor_input_types.append(tensor_type_from_shape(world, ops.F32, shape))
+    for shape, dtype in zip(normalized_input_shapes, input_dtypes):
+        tensor_input_types.append(
+            tensor_type_from_shape(world, _element_type_for_dtype(ops, dtype), shape)
+        )
         
     # Parameters
     # FX weights/biases (extracted from get_attr) are passed as trailing arguments
@@ -313,7 +342,11 @@ def build_model_function(
         attr = traced
         for part in target.split("."):
             attr = getattr(attr, part)
-        param_types.append(tensor_type_from_shape(world, ops.F32, attr.shape))
+        param_types.append(
+            tensor_type_from_shape(
+                world, _element_type_for_dtype(ops, attr.dtype), attr.shape
+            )
+        )
         translator.param_shapes.append(shape_to_mimir_dims(world, attr.shape))
 
     full_dom_types = dom_types + tensor_input_types + param_types

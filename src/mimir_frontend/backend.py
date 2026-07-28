@@ -12,7 +12,7 @@ through the `opt` plugin's default pipeline (which bufferizes tensor ops), lets
 `%ll.emit` write LLVM IR, and JIT-compiles it to a shared library via `mim.JIT`.
 
 Calling convention of the emitted function (verified against eager PyTorch):
-- every input tensor is passed as a flat row-major `float*`,
+- every input tensor is passed as a flat row-major `float*` or `int64_t*`,
 - the result tensor is returned as a callee-malloc'd `float*`.
 
 Dynamo lifts module parameters into graph placeholders, so all tensors — inputs
@@ -44,8 +44,8 @@ and clang), so rebuilding MimIR invalidates stale entries. Parameter *values*
 are runtime arguments and deliberately not part of the key. A `debug_dir`
 request always recompiles (to produce the dumps) but still refreshes the cache.
 
-Current limitations: float32 tensors only, static shapes, inference only (the
-compiled function does not participate in autograd).
+Current limitations: float32 outputs, float32/int64 inputs, static shapes, and
+inference only (the compiled function does not participate in autograd).
 
 Platform support: developed and tested on Linux. The platform-specific pieces
 (loaded-library discovery for the cache fingerprint, the CRT `free` paired
@@ -79,7 +79,7 @@ from .utils import build_model_function
 # `opt` supplies the default compile pipeline (incl. %tensor.lower_to_mem
 # bufferization) and `ll` its final %ll.emit phase — mirrors the lit-test
 # invocation `mim -p opt -p clos <file>.mim -p ll`.
-EXEC_PLUGINS = ["opt", "clos", "math", "tensor", "ll"]
+EXEC_PLUGINS = ["opt", "clos", "math", "tensor", "torch", "ll"]
 
 def _load_crt() -> ctypes.CDLL:
     """The C runtime providing the `free` that matches the JIT'd code's `malloc`."""
@@ -169,11 +169,12 @@ def _shared_lib_suffix() -> str:
 def _mim_fingerprint() -> str:
     """Fingerprint of everything the compiled artifact depends on besides the graph.
 
-    Covers the Python bindings, libmim, every file in the plugin directory
-    (annex `.mim` files and `libmim_*` modules), and the clang used by mim.JIT.
-    Stat-based (size + mtime), ccache-style.
+    Covers the frontend lowering sources, Python bindings, libmim, every file
+    in the plugin directory (annex `.mim` files and `libmim_*` modules), and
+    the clang used by mim.JIT. Stat-based (size + mtime), ccache-style.
     """
     parts = [getattr(mim, "__version__", "unversioned")]
+    parts.extend(_stat_sig(p) for p in sorted(Path(__file__).parent.glob("*.py")))
     parts.extend(_stat_sig(p) for p in sorted(Path(mim.__file__).parent.glob("_mim*")))
     if libmim := _libmim_path():
         parts.append(_stat_sig(libmim))
@@ -237,12 +238,18 @@ def _cache_store(cache_dir: Path, sources: list[Path]) -> None:
             tmp.unlink(missing_ok=True)
 
 
-def _check_tensors(tensors, what: str) -> None:
+def _check_tensors(
+    tensors, what: str, *, allowed_dtypes=(torch.float32,)
+) -> None:
     for i, t in enumerate(tensors):
         if not isinstance(t, torch.Tensor):
             raise NotImplementedError(f"mimir backend supports tensor {what} only, {what} {i} is {type(t).__name__}")
-        if t.dtype != torch.float32:
-            raise NotImplementedError(f"mimir backend supports float32 only, {what} {i} has dtype {t.dtype}")
+        if t.dtype not in allowed_dtypes:
+            supported = ", ".join(str(dtype) for dtype in allowed_dtypes)
+            raise NotImplementedError(
+                f"mimir backend supports {supported} {what}s, "
+                f"{what} {i} has dtype {t.dtype}"
+            )
         if t.dim() == 0:
             raise NotImplementedError(f"mimir backend does not support 0-d tensor {what}s")
 
@@ -288,7 +295,9 @@ def mimir_backend(
     if profile is not None and profile not in ("summary", "tree", "trace"):
         raise ValueError(f"profile must be 'summary', 'tree', or 'trace', got {profile!r}")
 
-    _check_tensors(example_inputs, "input")
+    _check_tensors(
+        example_inputs, "input", allowed_dtypes=(torch.float32, torch.int64)
+    )
     if any(n.op == "get_attr" for n in gm.graph.nodes):
         # Dynamo lifts parameters, buffers, and tensor constants into
         # placeholders; get_attr would need extra trailing-argument marshaling.
@@ -302,6 +311,7 @@ def mimir_backend(
 
     # Shapes are static: one specialization per Dynamo guard set.
     input_shapes = [tuple(t.shape) for t in example_inputs]
+    input_dtypes = [t.dtype for t in example_inputs]
     with torch.no_grad():
         example_outs = gm(*example_inputs)
     _check_tensors(example_outs, "output")
@@ -314,7 +324,7 @@ def mimir_backend(
 
     # The key covers the packed graph, input shapes, and the MimIR install;
     # it also names the exported symbol, so cached libraries are self-contained.
-    name = f"mimir_graph_{_cache_key(gm, input_shapes)}"
+    name = f"mimir_graph_{_cache_key(gm, list(zip(input_shapes, input_dtypes)))}"
     cached_so = cache_dir / f"{name}{_shared_lib_suffix()}"
 
     lib = keep_alive = None
@@ -341,7 +351,9 @@ def mimir_backend(
                 "trace": mim.Flags.Profile.Trace,
             }[profile]
 
-        build_model_function(world, gm, input_shapes, name=name)
+        build_model_function(
+            world, gm, input_shapes, input_dtypes=input_dtypes, name=name
+        )
 
         with _compile_lock:
             old_cwd = os.getcwd()
@@ -353,7 +365,13 @@ def mimir_backend(
                     world.write()
                 # The opt plugin's default pipeline ends in %ll.emit -> `<name>.ll`.
                 world.set(name)
-                world.optimize()
+                try:
+                    world.optimize()
+                except Exception:
+                    if debug_dir:
+                        world.set(f"{name}_failed")
+                        world.write()
+                    raise
                 if debug_dir:
                     world.set(f"{name}_post")
                     world.write()

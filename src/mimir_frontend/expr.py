@@ -25,7 +25,7 @@ def bin(op_name, lhs, rhs):
         if isinstance(val, mim.Def):
             return val
         if isinstance(val, int):
-            return world.lit_nat(val)
+            return world.lit(world.type_nat(), val)
         if isinstance(val, float):
             import struct
             bits = struct.unpack("<I", struct.pack("<f", float(val)))[0]

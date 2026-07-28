@@ -13,7 +13,7 @@ from mimir_frontend.translator import FXGraphTranslator
 
 def make_world() -> mim.World:
     driver = mim.Driver()
-    driver.load_plugins(["math", "tensor", "affine"])
+    driver.load_plugins(["math", "tensor", "torch", "affine"])
     return driver.world()
 
 
@@ -147,6 +147,8 @@ SUPPORTED_UNARY_OPS = [
     ("exp", torch.exp),
     ("tanh", torch.tanh),
     ("sqrt", torch.sqrt),
+    ("sin", torch.sin),
+    ("cos", torch.cos),
     ("abs", torch.abs),
     ("neg", torch.neg),
     ("sigmoid", torch.sigmoid),
@@ -177,7 +179,7 @@ def test_functional_relu_translates():
     result = translate_model(Model(), make_static_inputs_with_shapes(world, [(2, 3, 4)]))
 
     assert isinstance(result, mim.Def)
-    assert "%tensor.unary" in def_to_string(result)
+    assert "%torch.relu_op" in def_to_string(result)
 
 
 def test_shape_of_reads_symbolic_dims_from_mim_def_type():
@@ -273,7 +275,7 @@ def test_broadcast_binary_with_same_symbol_def_does_not_insert_expand():
     result = translate_model(Model(), [x, y])
 
     assert tensor_shape(result) == [n, world.lit_nat(4)]
-    assert "%tensor.broadcast" not in def_to_string(result)
+    assert "%torch.expand_op" not in def_to_string(result)
 
 
 
@@ -366,7 +368,7 @@ def test_sequence_of_elementwise_operators(shape_kind, rank):
     result = translate_model(Model(), make_inputs(world, 3, shape_kind, rank))
 
     assert isinstance(result, mim.Def)
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.binary", "%tensor.binary", "%tensor.unary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.add_op", "%torch.mul_op", "%torch.relu_op"])
 
 
 def test_binary_broadcast_leading_singleton_uses_common_output_shape():
@@ -379,7 +381,7 @@ def test_binary_broadcast_leading_singleton_uses_common_output_shape():
     result = translate_model(Model(), [x_input, y_input])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.broadcast_in_dim", "%tensor.binary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.expand_op", "%torch.add_op"])
 
 
 def test_binary_broadcast_rejects_incompatible_static_shape():
@@ -411,7 +413,7 @@ def test_real_aten_tensor_binary_overloads(aten_op):
     result = translate_model(Model(), make_inputs(world, 2, "dynamic", 3))
 
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%tensor.binary" in def_to_string(result)
+    assert "%torch." in def_to_string(result)
 
 
 @pytest.mark.parametrize(
@@ -443,7 +445,7 @@ def test_real_aten_scalar_mul_overload():
     result = translate_model(Model(), make_inputs(world, 1, "dynamic", 3))
 
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%tensor.unary" in def_to_string(result)
+    assert "%torch.mul_scalar_op" in def_to_string(result)
 
 
 def test_addmm_decomposes_to_mm_and_add():
@@ -456,7 +458,129 @@ def test_addmm_decomposes_to_mm_and_add():
     result = translate_model(Model(), [bias, x, y])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.product_2d", "%tensor.binary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%tensor.product_2d", "%torch.add_op"])
+
+
+def test_rank4_matmul_maps_directly_to_torch_matmul():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.ops.aten.matmul.default(lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(
+        world, [(2, 16, 5, 128), (2, 16, 128, 7)]
+    )
+    result = translate_model(Model(), [lhs, rhs])
+
+    assert tensor_shape_values(result) == [2, 16, 5, 7]
+    assert "%torch.matmul_op" in def_to_string(result)
+
+
+def test_matmul_broadcasts_batch_prefix_before_torch_matmul():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return lhs @ rhs
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(world, [(3, 5, 7), (2, 3, 7, 11)])
+    result = translate_model(Model(), [lhs, rhs])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 3, 5, 11]
+    assert "%torch.expand_op" in ir
+    assert "%torch.matmul_op" in ir
+
+
+def test_empty_strided_then_fill_preserves_shape_and_torch_semantics():
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    empty = ops.empty_strided([5, 5], [5, 1], dtype=torch.float32)
+    result = ops.fill_scalar(empty, -3.4028235e38)
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [5, 5]
+    assert "%torch.empty_strided_op" in ir
+    assert "%torch.fill_scalar_op" in ir
+
+
+def test_arange_i64_and_float_conversion_cover_rotary_position_path():
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    positions = ops.arange(0, 5, 1)
+    positions_f32 = ops.convert_element_type(positions, torch.float32)
+
+    assert tensor_shape_values(positions) == [5]
+    assert tensor_element_type(positions) == ops.I64
+    assert "%torch.arange_i64_op" in def_to_string(positions)
+    assert tensor_element_type(positions_f32) == ops.F32
+    assert "%tensor.unary" in def_to_string(positions_f32)
+
+
+def test_qwen_exact_transpose_int_overload_is_registered():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.transpose.int(x, -2, -1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4, 3]
+    assert "%torch.transpose_int_op" in def_to_string(result)
+
+
+def test_qwen_exact_unsafe_view_overload_is_registered():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten._unsafe_view.default(x, [6, 4])
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [6, 4]
+    assert "%torch.reshape_op" in def_to_string(result)
+
+
+def test_qwen_exact_silu_overload_is_registered():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.silu.default(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.silu_op" in def_to_string(result)
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float32])
+def test_qwen_exact_softmax_int_overload_is_registered(dtype):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.softmax.int(x, -1, dtype)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.softmax_op" in ir
+
+
+def test_qwen_exact_triu_overload_is_registered():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.triu.default(x, 1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(5, 5)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [5, 5]
+    assert "%torch.triu_op" in def_to_string(result)
 
 
 def test_convolution_2d_with_bias_translates_to_conv_and_add():
@@ -479,7 +603,7 @@ def test_convolution_2d_with_bias_translates_to_conv_and_add():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%tensor.binary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.add_op"])
 
 
 def test_functional_conv2d_translates_to_convolution():
@@ -492,7 +616,7 @@ def test_functional_conv2d_translates_to_convolution():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%tensor.binary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.add_op"])
 
 
 def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
@@ -548,7 +672,7 @@ def test_convolution_batch_one_result_can_feed_next_convolution():
     result = translator.translate(traced.graph, inputs)
 
     assert tensor_shape_values(result) == [5, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%tensor.unary", "%tensor.conv"])
+    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.relu_op", "%tensor.conv"])
 
 
 def test_index_tensor_translates_to_gather_dim0():
@@ -567,6 +691,42 @@ def test_index_tensor_translates_to_gather_dim0():
     assert "%tensor.gather" in def_to_string(result)
 
 
+def test_aten_gather_translates_to_tensor_gather():
+    class Model(torch.nn.Module):
+        def forward(self, x, index):
+            return torch.ops.aten.gather.default(x, 1, index)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 4)], elem_type=ops.F32)[0]
+    index = make_static_inputs_with_shapes(
+        world, [(2, 3)], elem_type=world.type_idx(world.lit_nat(4))
+    )[0]
+
+    result = translate_model(Model(), [x, index])
+
+    assert tensor_shape_values(result) == [2, 3]
+    assert "%tensor.gather" in def_to_string(result)
+
+
+def test_embedding_translates_to_dim0_gather():
+    class Model(torch.nn.Module):
+        def forward(self, weight, index):
+            return torch.ops.aten.embedding.default(weight, index, -1, False, False)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    weight = make_static_inputs_with_shapes(world, [(8, 4)], elem_type=ops.F32)[0]
+    index = make_static_inputs_with_shapes(
+        world, [(2, 3)], elem_type=ops.I64
+    )[0]
+
+    result = translate_model(Model(), [weight, index])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.embedding_op" in def_to_string(result)
+
+
 def test_scatter_src_translates_to_tensor_scatter():
     class Model(torch.nn.Module):
         def forward(self, x, index, src):
@@ -576,12 +736,51 @@ def test_scatter_src_translates_to_tensor_scatter():
     ops = FXGraphTranslator(world).ops
     x = make_static_inputs_with_shapes(world, [(4, 3)], elem_type=ops.F32)[0]
     index = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=world.type_idx(world.lit_nat(4)))[0]
-    src = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=ops.F32)[0]
+    src = make_static_inputs_with_shapes(world, [(3, 3)], elem_type=ops.F32)[0]
 
     result = translate_model(Model(), [x, index, src])
 
     assert tensor_shape_values(result) == [4, 3]
     assert "%tensor.scatter" in def_to_string(result)
+
+
+def test_alias_returns_the_same_ssa_value():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.alias.default(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3)])[0]
+
+    assert translate_model(Model(), [x]) == x
+
+
+def test_assert_tensor_metadata_emits_shape_guard():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            torch.ops.aten._assert_tensor_metadata.default(
+                x,
+                [2, 3],
+                [3, 1],
+                torch.float32,
+                device=torch.device("cpu"),
+                layout=torch.strided,
+            )
+            return x
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3)])[0]
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    translator.translate(traced.graph, [x])
+
+    guards = [
+        value
+        for node, value in translator.env.items()
+        if node.op == "call_function" and "_assert_tensor_metadata" in str(node.target)
+    ]
+    assert len(guards) == 1
+    assert "%torch.assert_tensor_metadata_op" in def_to_string(guards[0])
 
 
 def test_max_pool2d_translates_to_tensor_pool():
@@ -637,7 +836,7 @@ def test_lenet_style_cnn_with_pooling_translates():
     assert tensor_shape_values(result) == [2, 10]
     assert_ir_contains_in_order(
         def_to_string(result),
-        ["%tensor.conv", "%tensor.unary", "%tensor.pool", "%tensor.conv", "%tensor.pool", "%tensor.reshape", "%tensor.product_2d"],
+        ["%tensor.conv", "%torch.relu_op", "%tensor.pool", "%tensor.conv", "%tensor.pool", "%torch.reshape_op", "%tensor.product_2d"],
     )
 
 
@@ -745,7 +944,7 @@ def test_where_operator(shape_kind, rank):
     result = translate_model(Model(), [cond_input, x_input, y_input])
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == ops.F32
-    assert "%tensor.select" in def_to_string(result)
+    assert "%torch.where_op" in def_to_string(result)
 
 
 def test_where_broadcasts_scalar_branch_to_condition_shape():
@@ -762,7 +961,7 @@ def test_where_broadcasts_scalar_branch_to_condition_shape():
     result = translate_model(Model(), [cond, scalar, y])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.map", "%tensor.select"])
+    assert "%torch.where_op" in def_to_string(result)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])
@@ -899,7 +1098,7 @@ def test_expand_negative_one_keeps_input_dimension():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [5, 32]
-    assert "%tensor.broadcast" in def_to_string(result)
+    assert "%torch.expand_op" in def_to_string(result)
 
 
 def test_split_tensor_overload_returns_tuple_of_slices():
@@ -913,7 +1112,7 @@ def test_split_tensor_overload_returns_tuple_of_slices():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [3, 2]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.slice", "%tensor.slice", "%tensor.binary"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.slice_op", "%torch.slice_op", "%torch.add_op"])
 
 def test_reshape_operator():
     class Model(torch.nn.Module):
@@ -925,7 +1124,7 @@ def test_reshape_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert_ir_contains_in_order(ir, ["%tensor.reshape"])
+    assert_ir_contains_in_order(ir, ["%torch.reshape_op"])
 
 
 def test_view_infers_negative_one_dimension():
@@ -938,7 +1137,7 @@ def test_view_infers_negative_one_dimension():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [8, 400]
-    assert "%tensor.reshape" in def_to_string(result)
+    assert "%torch.reshape_op" in def_to_string(result)
 
 
 def test_torch_flatten_translates_to_reshape():
@@ -951,7 +1150,7 @@ def test_torch_flatten_translates_to_reshape():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 60]
-    assert "%tensor.reshape" in def_to_string(result)
+    assert "%torch.reshape_op" in def_to_string(result)
 
 
 def test_dropout_zero_probability_is_identity():
@@ -976,7 +1175,7 @@ def test_slice_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert_ir_contains_in_order(ir, ["%tensor.slice"])
+    assert_ir_contains_in_order(ir, ["%torch.slice_op"])
 
 def test_cat_operator():
     class Model(torch.nn.Module):
@@ -988,7 +1187,7 @@ def test_cat_operator():
     result = translate_model(Model(), [x_input, y_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%tensor.concat" in ir
+    assert "%torch.cat_op" in ir
 
 def test_squeeze_unsqueeze_operator():
     class Model(torch.nn.Module):
@@ -1001,7 +1200,7 @@ def test_squeeze_unsqueeze_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%tensor.reshape" in ir
+    assert "%torch.reshape_op" in ir
 
 def test_select_operator():
     class Model(torch.nn.Module):
@@ -1015,7 +1214,7 @@ def test_select_operator():
     # select is implemented as slice + squeeze(reshape)
     # Note: MimIR may normalize singleton dimensions away, making squeeze a no-op type-wise.
     ir = def_to_string(result)
-    assert "%tensor.slice" in ir
+    assert "%torch.slice_op" in ir
 
 def test_clone_copy_operator():
     class Model(torch.nn.Module):

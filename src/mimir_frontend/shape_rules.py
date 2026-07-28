@@ -66,8 +66,8 @@ class ShapeRules:
         """
         out_reversed = []
         for offset in range(1, max(len(s1), len(s2)) + 1):
-            d1 = s1[-offset] if offset <= len(s1) else self.world.lit_nat(1)
-            d2 = s2[-offset] if offset <= len(s2) else self.world.lit_nat(1)
+            d1 = s1[-offset] if offset <= len(s1) else self.world.lit(self.world.lit_nat_0().type(), 1)
+            d2 = s2[-offset] if offset <= len(s2) else self.world.lit(self.world.lit_nat_0().type(), 1)
             out_reversed.append(self.broadcast_dim(d1, d2))
         return list(reversed(out_reversed))
 
@@ -130,7 +130,7 @@ class ShapeRules:
         for i, d in enumerate(in_shape):
             if i in dims:
                 if keepdim:
-                    out_shape.append(self.world.lit_nat(1))
+                    out_shape.append(self.world.lit(self.world.lit_nat_0().type(), 1))
             else:
                 out_shape.append(d)
         return out_shape
@@ -161,7 +161,7 @@ class ShapeRules:
         rank = len(in_shape)
         actual_dim = dim + rank + 1 if dim < 0 else dim
         out_shape = list(in_shape)
-        out_shape.insert(actual_dim, self.world.lit_nat(1))
+        out_shape.insert(actual_dim, self.world.lit(self.world.lit_nat_0().type(), 1))
         return out_shape
 
     def slice_shape(self, in_shape: list[mim.Def], dim: int, start: int, end: int, step: int) -> list[mim.Def]:
@@ -182,11 +182,11 @@ class ShapeRules:
                     actual_end = min(end, s_in_val)
                     out_size = (actual_end - start + step - 1) // step
                 
-                out_shape[dim] = self.world.lit_nat(max(0, int(out_size)))
+                out_shape[dim] = self.world.lit(self.world.lit_nat_0().type(), max(0, int(out_size)))
             elif s_in_val is not None:
                 # end is None, but we know s_in
                 out_size = (s_in_val - start + step - 1) // step
-                out_shape[dim] = self.world.lit_nat(max(0, int(out_size)))
+                out_shape[dim] = self.world.lit(self.world.lit_nat_0().type(), max(0, int(out_size)))
             else:
                 out_shape[dim] = self.world.top_nat()
         else:
@@ -213,7 +213,7 @@ class ShapeRules:
                 break
         
         if is_fully_static:
-            out_shape[dim] = self.world.lit_nat(concat_dim_extent_val)
+            out_shape[dim] = self.world.lit(self.world.lit_nat_0().type(), concat_dim_extent_val)
         else:
             out_shape[dim] = self.world.top_nat()
         return out_shape
@@ -241,13 +241,13 @@ class ShapeRules:
             while curr < extent_val:
                 end = min(curr + split_size, extent_val)
                 part = list(in_shape)
-                part[actual_dim] = self.world.lit_nat(end - curr)
+                part[actual_dim] = self.world.lit(self.world.lit_nat_0().type(), end - curr)
                 outputs.append(part)
                 curr = end
             return outputs
 
         for size in split_size_or_sections:
             part = list(in_shape)
-            part[actual_dim] = self.world.lit_nat(size)
+            part[actual_dim] = self.world.lit(self.world.lit_nat_0().type(), size)
             outputs.append(part)
         return outputs

@@ -42,6 +42,8 @@ class FXGraphTranslator:
         for t, op, names, func in binary_ops:
             wrapper = self._wrap_binary(func)
             if t: m[t] = wrapper
+            if t and hasattr(t, "__name__"):
+                m[t.__name__] = wrapper
             if op: m[op] = wrapper
             for name in names:
                 m[name] = wrapper
@@ -58,9 +60,12 @@ class FXGraphTranslator:
             (torch.exp, "aten.exp.default", self.ops.exp),
             (torch.tanh, "aten.tanh.default", self.ops.tanh),
             (torch.sqrt, "aten.sqrt.default", self.ops.sqrt),
+            (torch.sin, "aten.sin.default", self.ops.sin),
+            (torch.cos, "aten.cos.default", self.ops.cos),
             (torch.abs, "aten.abs.default", self.ops.abs),
             (torch.neg, "aten.neg.default", self.ops.neg),
             (torch.sigmoid, "aten.sigmoid.default", self.ops.sigmoid),
+            (torch.nn.functional.silu, "aten.silu.default", self.ops.silu),
             (torch.reciprocal, "aten.reciprocal.default", self.ops.reciprocal),
             (torch.rsqrt, "aten.rsqrt.default", self.ops.rsqrt),
             (torch.logical_not, "aten.logical_not.default", self.ops.logical_not),
@@ -69,7 +74,10 @@ class FXGraphTranslator:
         for t, name, func in unary_ops:
             wrapper = self._wrap_unary(func)
             if t: m[t] = wrapper
+            if t and hasattr(t, "__name__"):
+                m[t.__name__] = wrapper
             if name: m[name] = wrapper
+        m[operator.neg] = self._wrap_unary(self.ops.neg)
 
         # Prims
         if hasattr(torch.ops, "prims") and hasattr(torch.ops.prims, "convert_element_type"):
@@ -77,19 +85,26 @@ class FXGraphTranslator:
         m["prims.convert_element_type.default"] = self._wrap_convert_element_type()
         m["aten.convert_element_type.default"] = self._wrap_convert_element_type()
         m["prims.fma.default"] = self._wrap_fma()
+        m["float"] = self._wrap_to_dtype(torch.float32)
+        m["to"] = self._wrap_to()
+        m["aten.to.dtype"] = self._wrap_to()
+        m["aten.to.dtype_layout"] = self._wrap_to()
 
         # Injective
         m[torch.cat] = self._wrap_cat()
         m["aten.cat.default"] = self._wrap_cat()
         m[torch.permute] = self._wrap_transpose()
         m["aten.permute.default"] = self._wrap_transpose()
+        m["aten.transpose.int"] = self._wrap_transpose()
         m["t"] = self._wrap_t()
+        m["transpose"] = self._wrap_transpose()
         
         m[torch.reshape] = self._wrap_reshape()
         m["aten.reshape.default"] = self._wrap_reshape()
         m["reshape"] = self._wrap_reshape()
         m["view"] = self._wrap_reshape()
         m["aten.view.default"] = self._wrap_reshape()
+        m["aten._unsafe_view.default"] = self._wrap_reshape()
         m[torch.flatten] = self._wrap_flatten()
         m["aten.flatten.using_ints"] = self._wrap_flatten()
         m["flatten"] = self._wrap_flatten()
@@ -108,7 +123,13 @@ class FXGraphTranslator:
         m["unsqueeze"] = self._wrap_unsqueeze()
         m["aten.unsqueeze.default"] = self._wrap_unsqueeze()
         m["contiguous"] = self._wrap_contiguous()
+        m["aten.contiguous.default"] = self._wrap_contiguous()
+        m["detach_"] = self._wrap_alias()
+        m["aten.detach_.default"] = self._wrap_alias()
         m["size"] = self._wrap_size()
+
+        if hasattr(torch._C, "_log_api_usage_once"):
+            m[torch._C._log_api_usage_once] = lambda node: self.world.lit_tt()
 
         m[torch.clone] = self._wrap_unary(self.ops.clone)
         m["clone"] = self._wrap_unary(self.ops.clone)
@@ -125,6 +146,12 @@ class FXGraphTranslator:
         m["expand"] = self._wrap_expand()
         m[torch.full] = self._wrap_full()
         m["aten.full.default"] = self._wrap_full()
+        m["aten.empty_strided.default"] = self._wrap_empty_strided()
+        m["aten.fill.Scalar"] = self._wrap_fill_scalar()
+        m[torch.arange] = self._wrap_arange()
+        m["aten.arange.default"] = self._wrap_arange()
+        m["aten.arange.start"] = self._wrap_arange()
+        m["aten.arange.start_step"] = self._wrap_arange()
 
         # Reductions
         m[torch.sum] = self._wrap_reduction(self.ops.sum)
@@ -143,10 +170,19 @@ class FXGraphTranslator:
         m[torch.var_mean] = self._wrap_var_mean()
         m["aten.var_mean.default"] = self._wrap_var_mean()
         m["aten.var_mean.correction"] = self._wrap_var_mean()
+        m[torch.softmax] = self._wrap_softmax()
+        m[torch.nn.functional.softmax] = self._wrap_softmax_int()
+        m["aten._softmax.default"] = self._wrap_softmax()
+        m["aten.softmax.int"] = self._wrap_softmax_int()
+        m[torch.nn.functional.layer_norm] = self._wrap_layer_norm()
+        m["aten.native_layer_norm.default"] = self._wrap_layer_norm()
 
         # Linear Algebra
         m[torch.mm] = self._wrap_binary(self.ops.mm)
+        m[torch.matmul] = self._wrap_binary(self.ops.matmul)
+        m[operator.matmul] = self._wrap_binary(self.ops.matmul)
         m["aten.mm.default"] = self._wrap_binary(self.ops.mm)
+        m["aten.matmul.default"] = self._wrap_binary(self.ops.matmul)
         m["aten.addmm.default"] = self._wrap_addmm()
         if hasattr(torch, "_C") and hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "linear"):
             m[torch._C._nn.linear] = self._wrap_linear()
@@ -174,13 +210,21 @@ class FXGraphTranslator:
 
         # Indexing / Scatter
         m["aten.index.Tensor"] = self._wrap_index_tensor()
+        m[torch.gather] = self._wrap_gather()
+        m["aten.gather.default"] = self._wrap_gather()
         m["aten.scatter.src"] = self._wrap_scatter()
         m["aten.scatter.default"] = self._wrap_scatter()
         m["aten.scatter_add.default"] = self._wrap_unsupported("aten.scatter_add")
+        m[torch.nn.functional.embedding] = self._wrap_functional_embedding()
+        m["aten.embedding.default"] = self._wrap_embedding()
+        m["aten.alias.default"] = self._wrap_alias()
+        m["aten._assert_tensor_metadata.default"] = self._wrap_assert_tensor_metadata()
 
         # Selection
         m[torch.where] = self._wrap_where()
         m["aten.where.self"] = self._wrap_where()
+        m[torch.triu] = self._wrap_triu()
+        m["aten.triu.default"] = self._wrap_triu()
 
         # Tuple operations
         m[operator.getitem] = self._wrap_getitem()
@@ -332,6 +376,12 @@ class FXGraphTranslator:
             return self.ops.index_tensor(x, indices[0])
         return convert
 
+    def _wrap_gather(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.gather(args[0], args[2], dim=args[1])
+        return convert
+
     def _wrap_scatter(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -340,6 +390,52 @@ class FXGraphTranslator:
             index = args[2]
             src = args[3]
             return self.ops.scatter(x, dim, index, src)
+        return convert
+
+    def _wrap_embedding(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            padding_idx = args[2] if len(args) > 2 else -1
+            scale_grad_by_freq = args[3] if len(args) > 3 else False
+            sparse = args[4] if len(args) > 4 else False
+            return self.ops.embedding(args[0], args[1], padding_idx, scale_grad_by_freq, sparse)
+        return convert
+
+    def _wrap_functional_embedding(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            padding_idx = args[2] if len(args) > 2 else node.kwargs.get("padding_idx", -1)
+            if padding_idx is None:
+                padding_idx = -1
+            max_norm = args[3] if len(args) > 3 else node.kwargs.get("max_norm")
+            if max_norm is not None:
+                raise NotImplementedError("embedding max_norm is not implemented")
+            scale_grad_by_freq = (
+                args[5] if len(args) > 5
+                else node.kwargs.get("scale_grad_by_freq", False)
+            )
+            sparse = args[6] if len(args) > 6 else node.kwargs.get("sparse", False)
+            return self.ops.embedding(
+                args[1], args[0], padding_idx, scale_grad_by_freq, sparse
+            )
+        return convert
+
+    def _wrap_alias(self):
+        def convert(node: fx.Node):
+            return self.retrieve_args(node)[0]
+        return convert
+
+    def _wrap_assert_tensor_metadata(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.assert_tensor_metadata(
+                args[0],
+                size=args[1] if len(args) > 1 else node.kwargs.get("size"),
+                stride=args[2] if len(args) > 2 else node.kwargs.get("stride"),
+                dtype=args[3] if len(args) > 3 else node.kwargs.get("dtype"),
+                device=node.kwargs.get("device"),
+                layout=node.kwargs.get("layout"),
+            )
         return convert
 
     def _wrap_unary(self, op_func):
@@ -375,6 +471,41 @@ class FXGraphTranslator:
             return self.ops.var_mean(input_def, dim=dim, keepdim=keepdim, correction=correction)
         return convert
 
+    def _wrap_softmax(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            input_def = args[0]
+            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", -1)
+            half_to_float = args[2] if len(args) > 2 else node.kwargs.get("half_to_float", False)
+            if half_to_float is not False:
+                raise NotImplementedError("softmax half_to_float=true is not implemented")
+            return self.ops.softmax(input_def, dim=dim)
+        return convert
+
+    def _wrap_softmax_int(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            input_def = args[0]
+            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", -1)
+            dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
+            if dtype not in (None, torch.float32, torch.float):
+                raise NotImplementedError(
+                    f"aten.softmax.int with dtype {dtype} is not implemented"
+                )
+            return self.ops.softmax(input_def, dim=dim)
+        return convert
+
+    def _wrap_layer_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            input_def = args[0]
+            normalized_shape = args[1]
+            weight = args[2] if len(args) > 2 else node.kwargs.get("weight")
+            bias = args[3] if len(args) > 3 else node.kwargs.get("bias")
+            eps = args[4] if len(args) > 4 else node.kwargs.get("eps", 1e-5)
+            return self.ops.native_layer_norm(input_def, normalized_shape, weight, bias, eps)
+        return convert
+
     def _wrap_where(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -391,8 +522,9 @@ class FXGraphTranslator:
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             x = args[0]
-            permutation = args[1]
-            return self.ops.transpose(x, permutation)
+            if len(args) == 3:
+                return self.ops.transpose_int(x, args[1], args[2])
+            return self.ops.transpose(x, args[1])
         return convert
 
     def _wrap_getitem(self):
@@ -411,12 +543,42 @@ class FXGraphTranslator:
                 elif isinstance(index, slice):
                     return self.ops.slice(obj, 0, index.start or 0, index.stop, index.step or 1)
                 elif isinstance(index, (tuple, list)):
+                    rank = len(self.ops.shape_of(obj))
+                    index = list(index)
+                    consumed = sum(
+                        item is not None and item is not Ellipsis for item in index
+                    )
+                    if index.count(Ellipsis) > 1:
+                        raise IndexError("an index can only have a single ellipsis")
+                    if Ellipsis in index:
+                        ellipsis = index.index(Ellipsis)
+                        fill = rank - consumed
+                        index[ellipsis:ellipsis + 1] = [slice(None)] * fill
+                    else:
+                        index.extend([slice(None)] * (rank - consumed))
+
                     res = obj
-                    for i, idx in enumerate(index):
+                    axis = 0
+                    for idx in index:
+                        if idx is None:
+                            res = self.ops.unsqueeze(res, axis)
+                            axis += 1
+                            continue
                         if isinstance(idx, slice):
-                            res = self.ops.slice(res, i, idx.start or 0, idx.stop, idx.step or 1)
+                            res = self.ops.slice(
+                                res,
+                                axis,
+                                idx.start or 0,
+                                idx.stop,
+                                idx.step or 1,
+                            )
+                            axis += 1
                         elif isinstance(idx, int):
-                            res = self.ops.select(res, i, idx)
+                            res = self.ops.select(res, axis, idx)
+                        else:
+                            raise NotImplementedError(
+                                f"tensor index component {idx!r} is not implemented"
+                            )
                     return res
             
             # Fallback to tuple projection
@@ -459,6 +621,36 @@ class FXGraphTranslator:
             return self.ops.fma(args[0], args[1], args[2])
         return convert
 
+    def _wrap_to_dtype(self, dtype):
+        def convert(node: fx.Node):
+            return self.ops.convert_element_type(self.retrieve_args(node)[0], dtype)
+        return convert
+
+    def _wrap_to(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            dtype = node.kwargs.get("dtype")
+            device = node.kwargs.get("device")
+            for arg in args[1:]:
+                if isinstance(arg, torch.dtype):
+                    dtype = arg
+                elif isinstance(arg, (torch.device, str)):
+                    device = torch.device(arg)
+            if device is not None and torch.device(device).type != "cpu":
+                raise NotImplementedError("to(device) currently supports CPU only")
+            if dtype is None:
+                return x
+            if (
+                dtype in (torch.float32, torch.float)
+                and self.ops._tensor_element_type(x) == self.ops.F32
+            ):
+                return x
+            if dtype in (torch.int64, torch.long) and self.ops._tensor_element_type(x) == self.ops.I64:
+                return x
+            return self.ops.convert_element_type(x, dtype)
+        return convert
+
     def _wrap_expand(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -473,6 +665,13 @@ class FXGraphTranslator:
             x = args[0]
             shape = args[1:] if len(args) > 2 else args[1]
             return self.ops.reshape(x, shape)
+        return convert
+
+    def _wrap_triu(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            diagonal = args[1] if len(args) > 1 else node.kwargs.get("diagonal", 0)
+            return self.ops.triu(args[0], diagonal=diagonal)
         return convert
 
     def _wrap_flatten(self):
@@ -571,6 +770,44 @@ class FXGraphTranslator:
             fill_value = args[1] if len(args) > 1 else node.kwargs.get("fill_value")
             dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
             return self.ops.full(shape, fill_value, dtype=dtype)
+        return convert
+
+    def _wrap_empty_strided(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.empty_strided(
+                args[0],
+                args[1],
+                dtype=node.kwargs.get("dtype"),
+                layout=node.kwargs.get("layout"),
+                device=node.kwargs.get("device"),
+                pin_memory=node.kwargs.get("pin_memory"),
+            )
+        return convert
+
+    def _wrap_fill_scalar(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.fill_scalar(args[0], args[1])
+        return convert
+
+    def _wrap_arange(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            if len(args) == 1:
+                start, end, step = 0, args[0], 1
+            else:
+                start, end = args[:2]
+                step = args[2] if len(args) > 2 else 1
+            return self.ops.arange(
+                start,
+                end,
+                step,
+                dtype=node.kwargs.get("dtype"),
+                layout=node.kwargs.get("layout"),
+                device=node.kwargs.get("device"),
+                pin_memory=node.kwargs.get("pin_memory"),
+            )
         return convert
 
     def _wrap_unsupported(self, name: str):
@@ -698,7 +935,11 @@ class FXGraphTranslator:
             if node.op in ("placeholder", "get_attr"):
                 continue
             elif node.op in ("call_function", "call_method"):
-                res = self.convert_node(node)
+                try:
+                    res = self.convert_node(node)
+                except Exception as exc:
+                    exc.add_note(f"while translating FX node: {node.format_node()}")
+                    raise
                 if isinstance(res, (mim.Lam, mim.App)):
                     res.set(node.name)
                 self.env[node] = res
@@ -762,10 +1003,12 @@ class FXGraphTranslator:
 
 def get_high_level_phase(world: mim.World) -> mim.Def:
     from mim._plugins.tensor import tensor as mim_tensor
+    from mim._plugins.torch import torch as mim_torch
     
     internal_cleanup = world.annex(mim_compile.internal_cleanup.value)
+    lower_torch = world.annex(mim_torch.lower_torch.value)
     lower_tensor = world.annex(mim_tensor.lower_tensor.value)
     fuse_tensor = world.annex(mim_tensor.fuse_tensor.value)
     
-    phases = [internal_cleanup, lower_tensor, fuse_tensor, internal_cleanup]
+    phases = [internal_cleanup, lower_torch, lower_tensor, fuse_tensor, internal_cleanup]
     return world.call(mim_compile.phases, world.lit_bool(False), phases)
