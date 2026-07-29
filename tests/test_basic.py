@@ -603,7 +603,7 @@ def test_convolution_2d_with_bias_translates_to_conv_and_add():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.add_op"])
+    assert "%torch.convolution_op" in def_to_string(result)
 
 
 def test_functional_conv2d_translates_to_convolution():
@@ -616,7 +616,25 @@ def test_functional_conv2d_translates_to_convolution():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.add_op"])
+    assert "%torch.convolution_op" in def_to_string(result)
+
+
+def test_functional_depthwise_conv2d_translates_to_grouped_convolution():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight):
+            return torch.nn.functional.conv2d(x, weight, groups=4, padding=1)
+
+    world = make_world()
+    shapes = [(2, 4, 8, 8), (4, 1, 3, 3)]
+    x, weight = make_static_inputs_with_shapes(world, shapes)
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    for value, shape in zip((x, weight), shapes):
+        translator.ops._remember_shape(value, shape)
+    result = translator.translate(traced.graph, [x, weight])
+
+    assert tensor_shape_values(result) == [2, 4, 8, 8]
+    assert "%torch.convolution_op" in def_to_string(result)
 
 
 def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
@@ -749,7 +767,10 @@ def test_convolution_batch_one_result_can_feed_next_convolution():
     result = translator.translate(traced.graph, inputs)
 
     assert tensor_shape_values(result) == [5, 8, 8]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.conv", "%torch.relu_op", "%tensor.conv"])
+    assert_ir_contains_in_order(
+        def_to_string(result),
+        ["%torch.convolution_op", "%torch.relu_op", "%torch.convolution_op"],
+    )
 
 
 def test_index_tensor_translates_to_gather_dim0():
@@ -860,7 +881,7 @@ def test_assert_tensor_metadata_emits_shape_guard():
     assert "%torch.assert_tensor_metadata_op" in def_to_string(guards[0])
 
 
-def test_max_pool2d_translates_to_tensor_pool():
+def test_max_pool2d_translates_to_torch_pool():
     class Model(torch.nn.Module):
         def forward(self, x):
             return torch.ops.aten.max_pool2d.default(x, [2, 2], [2, 2], [0, 0], [1, 1])
@@ -870,7 +891,47 @@ def test_max_pool2d_translates_to_tensor_pool():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4, 4]
-    assert "%tensor.pool" in def_to_string(result)
+    assert "%torch.max_pool2d_op" in def_to_string(result)
+
+
+def test_max_pool2d_ceil_mode_shape():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool2d.default(
+                x, [3, 3], [2, 2], [0, 0], [1, 1], True
+            )
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 14, 14)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 7, 7]
+    assert "%torch.max_pool2d_op" in def_to_string(result)
+
+
+def test_hardtanh_translates_to_torch_op():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.hardtanh(x, 0.0, 6.0)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.hardtanh_op" in def_to_string(result)
+
+
+def test_single_input_cat_is_identity():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.cat([x], dim=1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert result == x
 
 
 def test_avg_pool2d_translates_to_tensor_pool_and_scale():
@@ -913,7 +974,15 @@ def test_lenet_style_cnn_with_pooling_translates():
     assert tensor_shape_values(result) == [2, 10]
     assert_ir_contains_in_order(
         def_to_string(result),
-        ["%tensor.conv", "%torch.relu_op", "%tensor.pool", "%tensor.conv", "%tensor.pool", "%torch.reshape_op", "%torch.mm_op"],
+        [
+            "%torch.convolution_op",
+            "%torch.relu_op",
+            "%torch.max_pool2d_op",
+            "%torch.convolution_op",
+            "%tensor.pool",
+            "%torch.reshape_op",
+            "%torch.mm_op",
+        ],
     )
 
 

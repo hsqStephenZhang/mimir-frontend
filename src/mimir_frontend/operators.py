@@ -1351,9 +1351,6 @@ class OperatorLibrary:
         return self._remember_shape(result, list(shape))
 
     def convolution(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-        if groups != 1:
-            raise NotImplementedError("aten.convolution with groups != 1 is not implemented")
-
         semantic_in_dims = self.shape_of(x)
         weight_dims = self.shape_of(weight)
         if len(semantic_in_dims) != 4 or len(weight_dims) != 4:
@@ -1369,41 +1366,38 @@ class OperatorLibrary:
         padding = self._pair(padding, "padding")
         dilation = self._pair(dilation, "dilation")
 
-        n, _cin, h, w = in_dims
-        cout, _wcin, kh, kw = weight_dims
+        n, cin, h, w = in_dims
+        cout, cin_per_group, kh, kw = weight_dims
         out_spatial = self._conv2d_spatial_shape((h, w), (kh, kw), stride, dilation, padding)
         out_dims = [n, cout, out_spatial[0], out_spatial[1]]
 
-        ring = self.world.tuple([self.F32, self._f32_float_lit(0.0), self.f32_add_axm, self.f32_mul_axm])
-        callee = self.world.annex(tensor.conv.value)
-        callee = self.world.app(callee, ring)
-        callee = self._apply_grouped(callee, [n, in_dims[1], cout, h, w, kh, kw])
+        callee = self.world.annex(torch_dialect.convolution_op.value)
+        callee = self.world.app(callee, self.torch_arithmetic)
+        callee = self._apply_grouped(
+            callee, [n, cin, cout, cin_per_group, h, w, kh, kw]
+        )
         callee = self._apply_grouped(
             callee,
             [
                 self.world.tuple([self._to_nat(stride[0]), self._to_nat(stride[1])]),
-                self.world.tuple([self._to_nat(dilation[0]), self._to_nat(dilation[1])]),
                 self.world.tuple([self._to_nat(padding[0]), self._to_nat(padding[1])]),
+                self.world.tuple([self._to_nat(dilation[0]), self._to_nat(dilation[1])]),
+                self.world.lit_bool(False),
+                self.world.tuple([self._lit_nat(0), self._lit_nat(0)]),
+                self._to_nat(groups),
             ],
         )
-        result = self.world.app(callee, [x, weight])
-        result = self._remember_shape(result, out_dims)
-
-        if bias is not None:
-            add_dims = self._shape_dims(result)
-            bias_shape = []
-            for dim in add_dims:
-                if dim == cout:
-                    bias_shape.append(cout)
-                else:
-                    bias_shape.append(1)
-            if not bias_shape:
-                bias_shape = [cout]
-            bias = self.reshape(bias, bias_shape)
-            self._remember_shape(result, add_dims)
-            result = self.add(result, bias)
-            self._remember_shape(result, out_dims)
-        return result
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
 
     def _to_nat(self, value):
         return self._lit_nat(value) if isinstance(value, int) else value
@@ -1500,11 +1494,69 @@ class OperatorLibrary:
         return result
 
     def max_pool2d(self, x, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
-        if ceil_mode:
-            raise NotImplementedError("max_pool2d ceil_mode=True is not implemented")
         if return_indices:
             raise NotImplementedError("max_pool2d return_indices=True is not implemented")
-        return self.pool2d(x, kernel_size, stride=stride, padding=padding, dilation=dilation, mode="max")
+
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 4:
+            raise NotImplementedError("max_pool2d currently supports 4D NCHW inputs only")
+        kernel = self._pair(kernel_size, "kernel_size")
+        if stride is None:
+            stride = kernel
+        stride = self._pair(stride, "stride")
+        padding = self._pair(padding, "padding")
+        dilation = self._pair(dilation, "dilation")
+
+        n, c, h, w = in_dims
+        out_spatial = [
+            self._pool2d_dim(h, kernel[0], stride[0], dilation[0], padding[0], ceil_mode),
+            self._pool2d_dim(w, kernel[1], stride[1], dilation[1], padding[1], ceil_mode),
+        ]
+        callee = self.world.annex(torch_dialect.max_pool2d_op.value)
+        callee = self.world.app(callee, self.torch_floating)
+        callee = self._apply_grouped(callee, [n, c, h, w])
+        callee = self._apply_grouped(
+            callee,
+            [
+                self.world.tuple([self._to_nat(kernel[0]), self._to_nat(kernel[1])]),
+                self.world.tuple([self._to_nat(stride[0]), self._to_nat(stride[1])]),
+                self.world.tuple([self._to_nat(padding[0]), self._to_nat(padding[1])]),
+                self.world.tuple([self._to_nat(dilation[0]), self._to_nat(dilation[1])]),
+                self.world.lit_bool(ceil_mode),
+            ],
+        )
+        result = self.world.app(callee, x)
+        return self._remember_shape(result, [n, c, *out_spatial])
+
+    def _pool2d_dim(self, size, kernel, stride, dilation, padding, ceil_mode):
+        if not all(isinstance(value, int) for value in (size, kernel, stride, dilation, padding)):
+            return self._conv2d_dim(size, kernel, stride, dilation, padding)
+        effective_kernel = dilation * (kernel - 1) + 1
+        numerator = size + 2 * padding - effective_kernel
+        if ceil_mode:
+            numerator += stride - 1
+        output = numerator // stride + 1
+        if ceil_mode and (output - 1) * stride >= size + padding:
+            output -= 1
+        return self._lit_nat(output)
+
+    def hardtanh(self, x, min_val=-1.0, max_val=1.0):
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        callee = self.world.annex(torch_dialect.hardtanh_op.value)
+        callee = self.world.app(callee, self.torch_arithmetic)
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)]
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                x,
+                self._f32_float_lit(float(min_val)),
+                self._f32_float_lit(float(max_val)),
+            ]),
+        )
+        return self._remember_shape(result, dims)
 
     def avg_pool2d(
         self,
@@ -1818,15 +1870,18 @@ class OperatorLibrary:
 
     def cat(self, tensors, dim=0):
         """
-        Translates to `%tensor.concat`.
+        Translates to `%torch.cat_op`.
+
+        A one-element concatenation is the identity and is eliminated eagerly.
         """
-        num_inputs = tensors.num_projs()
-        first_tensor = tensors.proj(num_inputs, 0)
+        num_inputs = len(tensors)
+        if num_inputs == 1:
+            return tensors[0]
+        first_tensor = tensors[0]
         elem_t = self._tensor_element_type(first_tensor)
 
         input_dims_list = []
-        for i in range(num_inputs):
-            t = tensors.proj(num_inputs, i)
+        for t in tensors:
             input_dims = self.shape_of(t)
             input_dims_list.append(input_dims)
         logical_rank = len(input_dims_list[0])
@@ -1860,18 +1915,7 @@ class OperatorLibrary:
             callee, self.world.lit(self.world.type_idx(physical_rank), physical_dim)
         )
         callee = self.world.app(callee, self.world.tuple(input_shapes))
-        result = self.world.app(callee, tensors)
-        return self._remember_shape(result, out_dims)
-        
-        callee = self.world.annex(tensor.concat.value)
-        callee = self._apply_grouped(callee, [elem_t, self._lit_nat(num_inputs), rank])
-        
-        idx_t = self.world.type_idx(rank)
-        ax = self.world.lit(idx_t, dim)
-        callee = self.world.app(callee, ax)
-        
-        callee = self.world.app(callee, self.world.tuple(input_shapes))
-        result = self.world.app(callee, tensors)
+        result = self.world.app(callee, self.world.tuple(tensors))
         return self._remember_shape(result, out_dims)
 
     def transpose(self, x, permutation):

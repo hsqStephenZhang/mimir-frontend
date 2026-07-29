@@ -35,6 +35,10 @@ Profiling: pass ``options={"profile": "summary" | "tree" | "trace"}`` (or set
 `<name>_profile.json` for chrome://tracing, Perfetto, or speedscope.
 Profiling (like `debug_dir`) forces a fresh compile instead of a cache hit.
 
+Large graphs can raise the generic MimIR fixed-point guard with
+``options={"max_fp_iters": N}`` (or ``MIMIR_MAX_FP_ITERS``). The compiler
+default remains unchanged when neither is supplied.
+
 Caching: compiled `.so` files are reused across processes from
 ``~/.cache/mimir-frontend/jit`` (override with ``options={"cache_dir": ...}``
 or ``MIMIR_CACHE_DIR``; disable with ``options={"cache": False}``). The cache
@@ -288,12 +292,17 @@ def mimir_backend(
     opts = dict(options or {})
     debug_dir = opts.pop("debug_dir", None) or os.environ.get("MIMIR_DEBUG_DIR")
     profile = opts.pop("profile", None) or os.environ.get("MIMIR_PROFILE")
+    max_fp_iters = opts.pop("max_fp_iters", None) or os.environ.get("MIMIR_MAX_FP_ITERS")
     cache_enabled = opts.pop("cache", True)
     cache_dir = Path(opts.pop("cache_dir", None) or os.environ.get("MIMIR_CACHE_DIR") or _default_cache_dir())
     if opts:
         raise TypeError(f"unknown mimir backend options: {sorted(opts)}")
     if profile is not None and profile not in ("summary", "tree", "trace"):
         raise ValueError(f"profile must be 'summary', 'tree', or 'trace', got {profile!r}")
+    if max_fp_iters is not None:
+        max_fp_iters = int(max_fp_iters)
+        if max_fp_iters <= 0:
+            raise ValueError("max_fp_iters must be positive")
 
     _check_tensors(
         example_inputs, "input", allowed_dtypes=(torch.float32, torch.int64)
@@ -342,6 +351,8 @@ def mimir_backend(
 
         driver = mim.Driver()
         driver.load_plugins(EXEC_PLUGINS)
+        if max_fp_iters is not None:
+            driver.flags().max_fp_iters = max_fp_iters
         world = driver.world()
         if profile:
             # Phases only record spans while this flag is set (see mim Phase::run).

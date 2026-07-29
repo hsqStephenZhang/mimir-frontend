@@ -87,10 +87,10 @@ def _reset_dynamo(monkeypatch, tmp_path_factory):
     torch._dynamo.reset()
 
 
-def check_against_eager(model, *inputs):
+def check_against_eager(model, *inputs, options=None):
     with torch.no_grad():
         want = model(*inputs)
-        compiled = torch.compile(model, backend=mimir_backend)
+        compiled = torch.compile(model, backend=mimir_backend, options=options)
         got = compiled(*inputs)
     torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
 
@@ -144,6 +144,28 @@ def test_torchvision_resnet18_matches_eager():
     model = torchvision.models.resnet18(weights=None).eval()
     # A smaller static image exercises the complete architecture while
     # keeping the loop-based reference lowering suitable for a test run.
+    check_against_eager(model, torch.randn(1, 3, 32, 32))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "constructor_name",
+    ["squeezenet1_1", "densenet_slim", "mobilenet_v2"],
+)
+def test_torchvision_additional_classifiers_match_eager(constructor_name):
+    torchvision = pytest.importorskip("torchvision")
+    if constructor_name == "densenet_slim":
+        # Preserve all DenseNet transitions and multi-input DenseBlock cats
+        # without making this correctness test a 120-convolution stress test.
+        model = torchvision.models.densenet.DenseNet(
+            growth_rate=8,
+            block_config=(2, 2, 2, 2),
+            num_init_features=16,
+            bn_size=2,
+            num_classes=10,
+        ).eval()
+    else:
+        model = getattr(torchvision.models, constructor_name)(weights=None).eval()
     check_against_eager(model, torch.randn(1, 3, 32, 32))
 
 

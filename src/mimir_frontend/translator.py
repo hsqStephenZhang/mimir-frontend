@@ -54,6 +54,8 @@ class FXGraphTranslator:
         m[torch.clamp] = self._wrap_clamp()
         m["aten.clamp.default"] = self._wrap_clamp()
         m["aten.clamp.Tensor"] = self._wrap_clamp()
+        m[torch.nn.functional.hardtanh] = self._wrap_hardtanh()
+        m["aten.hardtanh.default"] = self._wrap_hardtanh()
         m[operator.floordiv] = self._wrap_nat_binary(self.ops.nat_floordiv)
 
         # Elementwise Unary
@@ -652,6 +654,15 @@ class FXGraphTranslator:
             return self.ops.clamp(x, min_val=min_val, max_val=max_val)
         return convert
 
+    def _wrap_hardtanh(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            min_val = args[1] if len(args) > 1 else node.kwargs.get("min_val", -1.0)
+            max_val = args[2] if len(args) > 2 else node.kwargs.get("max_val", 1.0)
+            return self.ops.hardtanh(x, min_val=min_val, max_val=max_val)
+        return convert
+
     def _wrap_convert_element_type(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -805,7 +816,7 @@ class FXGraphTranslator:
             args = self.retrieve_args(node)
             tensors = args[0]
             dim = args[1] if len(args) > 1 else node.kwargs.get("dim", 0)
-            return self.ops.cat(self.world.tuple(tensors), dim=dim)
+            return self.ops.cat(tensors, dim=dim)
         return convert
 
     def _wrap_full(self):
