@@ -80,6 +80,10 @@ from torch import fx
 
 from .utils import build_model_function
 
+# Dynamo intentionally keeps recurrent modules opaque unless this is enabled.
+# The backend handles their standard ATen entry points directly.
+torch._dynamo.config.allow_rnn = True
+
 # `opt` supplies the default compile pipeline (incl. %tensor.lower_to_mem
 # bufferization) and `ll` its final %ll.emit phase — mirrors the lit-test
 # invocation `mim -p opt -p clos <file>.mim -p ll`.

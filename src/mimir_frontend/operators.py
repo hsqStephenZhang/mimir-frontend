@@ -1286,6 +1286,205 @@ class OperatorLibrary:
         output_dims = batch_dims + [out_features]
         return self._remember_shape(result, output_dims)
 
+    def _optional_recurrent_bias(self, bias, size, elem_t):
+        if bias is not None:
+            return self.world.implicit_app(self.world.annex(option.some.value), bias)
+        bias_t = self.world.arr(size, elem_t)
+        return self.world.app(self.world.annex(option.none.value), bias_t)
+
+    def _recurrent_direction(
+        self,
+        kind,
+        input,
+        hidden,
+        weight_ih,
+        weight_hh,
+        bias_ih,
+        bias_hh,
+        *,
+        reverse,
+        relu=False,
+        cell=None,
+    ):
+        """Map one standard recurrent direction to a Torch dialect axiom."""
+        seq, batch, input_size = self.shape_of(input)
+        hidden_dims = self.shape_of(hidden)
+        if len(hidden_dims) != 2:
+            raise ValueError("recurrent hidden state must have shape [batch, hidden]")
+        hidden_size = hidden_dims[1]
+        gate_size = self.shape_of(weight_ih)[0]
+        elem_t = self._tensor_element_type(input)
+
+        axiom = {
+            "rnn": torch_dialect.rnn_direction_op,
+            "gru": torch_dialect.gru_direction_op,
+            "lstm": torch_dialect.lstm_direction_op,
+        }[kind]
+        callee = self.world.annex(axiom.value)
+        callee = self.world.app(callee, self.torch_floating)
+        callee = self._apply_grouped(
+            callee, [seq, batch, input_size, hidden_size]
+        )
+        if kind == "rnn":
+            callee = self._apply_grouped(
+                callee,
+                [self.world.lit_bool(relu), self.world.lit_bool(reverse)],
+            )
+        else:
+            callee = self.world.app(callee, self.world.lit_bool(reverse))
+
+        args = [input, hidden]
+        if kind == "lstm":
+            if cell is None:
+                raise ValueError("LSTM requires an initial cell state")
+            args.append(cell)
+        args.extend([
+            weight_ih,
+            weight_hh,
+            self._optional_recurrent_bias(bias_ih, gate_size, elem_t),
+            self._optional_recurrent_bias(bias_hh, gate_size, elem_t),
+        ])
+        result = self.world.app(callee, self.world.tuple(args))
+
+        output = result.proj(3 if kind == "lstm" else 2, 0)
+        final_hidden = result.proj(3 if kind == "lstm" else 2, 1)
+        self._remember_shape(output, [seq, batch, hidden_size])
+        self._remember_shape(final_hidden, [batch, hidden_size])
+        if kind != "lstm":
+            return output, final_hidden
+        final_cell = result.proj(3, 2)
+        self._remember_shape(final_cell, [batch, hidden_size])
+        return output, final_hidden, final_cell
+
+    def _stack_recurrent_states(self, states):
+        if len(states) == 1:
+            return self.unsqueeze(states[0], 0)
+        batch, hidden = self.shape_of(states[0])
+        # A literal batch extent of one is erased from MimIR's physical array
+        # type. Concatenating the remaining hidden axis still lays out complete
+        # states consecutively, and the final reshape restores [D*L, B, H].
+        cat_dim = 1 if self._is_lit_nat_value(batch, 1) else 0
+        flattened = self.cat(states, dim=cat_dim)
+        return self.reshape(flattened, [len(states), batch, hidden])
+
+    def recurrent(
+        self,
+        kind,
+        input,
+        hx,
+        params,
+        has_biases,
+        num_layers,
+        dropout,
+        train,
+        bidirectional,
+        batch_first,
+        *,
+        relu=False,
+    ):
+        """Translate the standard ATen RNN/GRU/LSTM input overload.
+
+        Python handles only the statically configured layer/direction parameter
+        layout. Every recurrent direction, including its time loop and gate
+        semantics, remains a single `%torch.*_direction_op`.
+        """
+        if not isinstance(num_layers, int) or num_layers <= 0:
+            raise ValueError("recurrent num_layers must be a positive integer")
+        if train and dropout != 0:
+            raise NotImplementedError(
+                "training recurrent dropout requires an RNG/effectful dropout operator"
+            )
+
+        input_dims = self.shape_of(input)
+        if len(input_dims) != 3:
+            raise NotImplementedError(
+                "standard recurrent input overload requires a rank-3 tensor"
+            )
+        if batch_first:
+            input = self.transpose_int(input, 0, 1)
+            batch, seq, _ = input_dims
+        else:
+            seq, batch, _ = input_dims
+
+        if kind == "lstm":
+            hidden_state, cell_state = hx
+        else:
+            hidden_state, cell_state = hx, None
+        hidden_dims = self.shape_of(hidden_state)
+        if len(hidden_dims) != 3:
+            raise ValueError("recurrent hidden state must have rank 3")
+        hidden_size = hidden_dims[2]
+        directions = 2 if bidirectional else 1
+        params_per_direction = 4 if has_biases else 2
+        expected_params = num_layers * directions * params_per_direction
+        if len(params) != expected_params:
+            raise ValueError(
+                f"recurrent parameter list has {len(params)} entries, "
+                f"expected {expected_params}"
+            )
+
+        layer_input = input
+        final_hidden = []
+        final_cells = []
+        cursor = 0
+        for layer in range(num_layers):
+            direction_outputs = []
+            for direction in range(directions):
+                state_index = layer * directions + direction
+                h0 = self.select(hidden_state, 0, state_index)
+                c0 = (
+                    self.select(cell_state, 0, state_index)
+                    if cell_state is not None
+                    else None
+                )
+                weight_ih, weight_hh = params[cursor:cursor + 2]
+                cursor += 2
+                if has_biases:
+                    bias_ih, bias_hh = params[cursor:cursor + 2]
+                    cursor += 2
+                else:
+                    bias_ih = bias_hh = None
+
+                result = self._recurrent_direction(
+                    kind,
+                    layer_input,
+                    h0,
+                    weight_ih,
+                    weight_hh,
+                    bias_ih,
+                    bias_hh,
+                    reverse=direction == 1,
+                    relu=relu,
+                    cell=c0,
+                )
+                direction_outputs.append(result[0])
+                final_hidden.append(result[1])
+                if kind == "lstm":
+                    final_cells.append(result[2])
+
+            layer_input = (
+                direction_outputs[0]
+                if directions == 1
+                else self.cat(direction_outputs, dim=2)
+            )
+
+        output = (
+            self.transpose_int(layer_input, 0, 1)
+            if batch_first
+            else layer_input
+        )
+        output_dims = (
+            [batch, seq, directions * self.rules._dim_literal_value(hidden_size)]
+            if batch_first and self.rules._dim_literal_value(hidden_size) is not None
+            else self.shape_of(output)
+        )
+        self._remember_shape(output, output_dims)
+        hidden_out = self._stack_recurrent_states(final_hidden)
+        if kind != "lstm":
+            return self.world.tuple([output, hidden_out])
+        cell_out = self._stack_recurrent_states(final_cells)
+        return self.world.tuple([output, hidden_out, cell_out])
+
     def batch_norm_inference(
         self, input, running_mean, running_var, weight=None, bias=None, eps=1e-5
     ):

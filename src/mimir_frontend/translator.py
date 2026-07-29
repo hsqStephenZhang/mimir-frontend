@@ -152,6 +152,8 @@ class FXGraphTranslator:
         m["expand"] = self._wrap_expand()
         m[torch.full] = self._wrap_full()
         m["aten.full.default"] = self._wrap_full()
+        m[torch.zeros] = self._wrap_zeros()
+        m["aten.zeros.default"] = self._wrap_zeros()
         m["aten.empty_strided.default"] = self._wrap_empty_strided()
         m["aten.fill.Scalar"] = self._wrap_fill_scalar()
         m[torch.arange] = self._wrap_arange()
@@ -198,6 +200,25 @@ class FXGraphTranslator:
         if hasattr(torch, "_C") and hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "linear"):
             m[torch._C._nn.linear] = self._wrap_linear()
         m["aten.linear.default"] = self._wrap_linear()
+
+        # Standard recurrent module entry points. Dynamo emits these operators
+        # when torch._dynamo.config.allow_rnn is enabled.
+        for target, name, relu in (
+            (getattr(torch, "rnn_tanh", None), "rnn_tanh", False),
+            (getattr(torch, "rnn_relu", None), "rnn_relu", True),
+        ):
+            wrapper = self._wrap_recurrent("rnn", relu=relu)
+            if target is not None:
+                m[target] = wrapper
+            m[name] = wrapper
+            m[f"aten.{name}.input"] = wrapper
+        for kind in ("gru", "lstm"):
+            wrapper = self._wrap_recurrent(kind)
+            target = getattr(torch, kind, None)
+            if target is not None:
+                m[target] = wrapper
+            m[kind] = wrapper
+            m[f"aten.{kind}.input"] = wrapper
         m["torch._C._nn.linear"] = self._wrap_linear()
 
         # Convolution
@@ -273,6 +294,28 @@ class FXGraphTranslator:
             weight = args[1]
             bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
             return self.ops.linear(input, weight, bias=bias)
+        return convert
+
+    def _wrap_recurrent(self, kind, *, relu=False):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            if len(args) != 9:
+                raise NotImplementedError(
+                    f"{kind} currently supports the standard 9-argument input overload"
+                )
+            return self.ops.recurrent(
+                kind,
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+                args[6],
+                args[7],
+                args[8],
+                relu=relu,
+            )
         return convert
 
     def _wrap_convolution(self):
@@ -826,6 +869,31 @@ class FXGraphTranslator:
             fill_value = args[1] if len(args) > 1 else node.kwargs.get("fill_value")
             dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
             return self.ops.full(shape, fill_value, dtype=dtype)
+        return convert
+
+    def _wrap_zeros(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            shape = args[0] if len(args) == 1 else tuple(args)
+            device = node.kwargs.get("device")
+            layout = node.kwargs.get("layout")
+            pin_memory = node.kwargs.get("pin_memory")
+            requires_grad = node.kwargs.get("requires_grad", False)
+            if device is not None and torch.device(device).type != "cpu":
+                raise NotImplementedError("zeros currently supports CPU tensors only")
+            if layout not in (None, torch.strided):
+                raise NotImplementedError("zeros currently supports strided layout only")
+            if pin_memory not in (None, False):
+                raise NotImplementedError("zeros pin_memory=True is not implemented")
+            if requires_grad:
+                raise NotImplementedError(
+                    "zeros requires_grad=True is not implemented"
+                )
+            return self.ops.full(
+                shape,
+                0,
+                dtype=node.kwargs.get("dtype"),
+            )
         return convert
 
     def _wrap_empty_strided(self):
