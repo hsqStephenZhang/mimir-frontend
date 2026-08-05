@@ -1025,8 +1025,16 @@ class FXGraphTranslator:
 
         actual_inputs = [lam.var().proj(num_params, i) for i in range(num_sym, num_sym + num_inputs)]
         if hasattr(self, "input_shapes"):
-            for actual_input, shape in zip(actual_inputs[:len(placeholders)], self.input_shapes):
-                self.ops._remember_shape(actual_input, shape)
+            for input_index, (actual_input, shape) in enumerate(
+                zip(actual_inputs[:len(placeholders)], self.input_shapes)
+            ):
+                sym_names_for_input = self.input_sym_names[input_index]
+                bound_shape = [
+                    self.ops.sym_map[sym_name]
+                    if sym_name is not None else dim
+                    for dim, sym_name in zip(shape, sym_names_for_input)
+                ]
+                self.ops._remember_shape(actual_input, bound_shape)
         if hasattr(self, "param_shapes"):
             for actual_input, shape in zip(actual_inputs[len(placeholders):], self.param_shapes):
                 self.ops._remember_shape(actual_input, shape)

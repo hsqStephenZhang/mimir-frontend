@@ -2073,6 +2073,10 @@ class OperatorLibrary:
 
         A one-element concatenation is the identity and is eliminated eagerly.
         """
+        if isinstance(tensors, mim.Tuple):
+            num_inputs = tensors.num_projs()
+            tensors = [tensors.proj(num_inputs, i) for i in range(num_inputs)]
+
         num_inputs = len(tensors)
         if num_inputs == 1:
             return tensors[0]

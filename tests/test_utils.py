@@ -17,8 +17,8 @@ def test_model_to_mimir_outputs_high_level_tensor_ir():
         compile_phase="high_level",
     )
 
-    assert "%tensor.binary" in ir
-    assert "%tensor.unary" in ir
+    assert "%torch.add_op" in ir
+    assert "%torch.relu_op" in ir
 
 
 def test_model_to_mimir_signature_uses_symbolic_nat_in_input_tensor_types():
