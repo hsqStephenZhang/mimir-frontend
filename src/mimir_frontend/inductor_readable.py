@@ -29,7 +29,7 @@ class PartialTranslation:
 
 def make_world() -> mim.World:
     driver = mim.Driver()
-    driver.load_plugins(["math", "tensor", "affine"])
+    driver.load_plugins(["math", "tensor", "torch", "affine"])
     return driver.world()
 
 

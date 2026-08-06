@@ -85,9 +85,10 @@ from .utils import build_model_function
 torch._dynamo.config.allow_rnn = True
 
 # `opt` supplies the default compile pipeline (incl. %tensor.lower_to_mem
-# bufferization) and `ll` its final %ll.emit phase — mirrors the lit-test
-# invocation `mim -p opt -p clos <file>.mim -p ll`.
-EXEC_PLUGINS = ["opt", "clos", "math", "tensor", "torch", "ll"]
+# bufferization) and `ll` its final %ll.emit phase. Fully decomposed FX graphs
+# contain local CFG only; loading `clos` would unnecessarily closure-convert
+# every loop continuation and transitively capture all later model parameters.
+EXEC_PLUGINS = ["opt", "math", "tensor", "torch", "ll"]
 
 def _load_crt() -> ctypes.CDLL:
     """The C runtime providing the `free` that matches the JIT'd code's `malloc`."""
@@ -246,6 +247,21 @@ def _cache_store(cache_dir: Path, sources: list[Path]) -> None:
             tmp.unlink(missing_ok=True)
 
 
+def _emit_profile(driver, profile: str, build_dir: Path, name: str, debug_dir) -> None:
+    """Publish all completed phase spans, including those from failed compiles."""
+    report = {
+        "summary": driver.profiler().summary,
+        "tree": driver.profiler().tree,
+        "trace": driver.profiler().chrome_trace,
+    }[profile]()
+    if profile == "trace" or debug_dir:
+        dest = build_dir / f"{name}_profile.{'json' if profile == 'trace' else 'txt'}"
+        dest.write_text(report)
+        print(f"[mimir] {name}: phase profile written to {dest}", file=sys.stderr)
+    else:
+        print(f"[mimir] {name}: phase profile\n{report}", file=sys.stderr)
+
+
 def _check_tensors(
     tensors, what: str, *, allowed_dtypes=(torch.float32,)
 ) -> None:
@@ -370,47 +386,37 @@ def mimir_backend(
             world, gm, input_shapes, input_dtypes=input_dtypes, name=name
         )
 
-        with _compile_lock:
-            old_cwd = os.getcwd()
-            os.chdir(build_dir)
-            try:
-                if debug_dir:
-                    # world.write() dumps the world to `<world name>.mim` in cwd.
-                    world.set(f"{name}_pre")
-                    world.write()
-                # The opt plugin's default pipeline ends in %ll.emit -> `<name>.ll`.
-                world.set(name)
+        try:
+            with _compile_lock:
+                old_cwd = os.getcwd()
+                os.chdir(build_dir)
                 try:
-                    world.optimize()
-                except Exception:
                     if debug_dir:
-                        world.set(f"{name}_failed")
+                        # world.write() dumps the world to `<world name>.mim` in cwd.
+                        world.set(f"{name}_pre")
                         world.write()
-                    raise
-                if debug_dir:
-                    world.set(f"{name}_post")
-                    world.write()
-                jit = mim.JIT(name, [name])
-                lib = jit.compile_and_load()
-                # Resolve while still chdir'd: on POSIX the JIT builds
-                # `./<name>.so` in cwd, on Windows a DLL in a temp dir.
-                built_lib = Path(jit._get_so_path()).resolve()
-            finally:
-                os.chdir(old_cwd)
-
-        if profile:
-            report = {
-                "summary": driver.profiler().summary,
-                "tree": driver.profiler().tree,
-                "trace": driver.profiler().chrome_trace,
-            }[profile]()
-            if profile == "trace" or debug_dir:
-                # chrome://tracing JSON (and anything under debug_dir) goes to a file.
-                dest = build_dir / f"{name}_profile.{'json' if profile == 'trace' else 'txt'}"
-                dest.write_text(report)
-                print(f"[mimir] {name}: phase profile written to {dest}", file=sys.stderr)
-            else:
-                print(f"[mimir] {name}: phase profile\n{report}", file=sys.stderr)
+                    # The opt plugin's default pipeline ends in %ll.emit -> `<name>.ll`.
+                    world.set(name)
+                    try:
+                        world.optimize()
+                    except Exception:
+                        if debug_dir:
+                            world.set(f"{name}_failed")
+                            world.write()
+                        raise
+                    if debug_dir:
+                        world.set(f"{name}_post")
+                        world.write()
+                    jit = mim.JIT(name, [name])
+                    lib = jit.compile_and_load()
+                    # Resolve while still chdir'd: on POSIX the JIT builds
+                    # `./<name>.so` in cwd, on Windows a DLL in a temp dir.
+                    built_lib = Path(jit._get_so_path()).resolve()
+                finally:
+                    os.chdir(old_cwd)
+        finally:
+            if profile:
+                _emit_profile(driver, profile, build_dir, name, debug_dir)
 
         if cache_enabled:
             _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])

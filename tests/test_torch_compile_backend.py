@@ -9,7 +9,7 @@ import shutil
 import pytest
 import torch
 
-from mimir_frontend.backend import mimir_backend
+from mimir_frontend.backend import EXEC_PLUGINS, mimir_backend
 
 pytestmark = pytest.mark.skipif(shutil.which("clang") is None, reason="clang not on PATH")
 
@@ -222,6 +222,10 @@ def test_registered_by_name():
     torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
 
 
+def test_execution_pipeline_uses_local_cfg_without_closure_conversion():
+    assert "clos" not in EXEC_PLUGINS
+
+
 class TwoOutputs(torch.nn.Module):
     """Two outputs of different shapes sharing an intermediate."""
 
@@ -294,6 +298,37 @@ def test_cache_can_be_disabled(tmp_path):
         got = torch.compile(model, backend="mimir", options={"cache": False, "cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got, model(x), rtol=1e-4, atol=1e-4)
     assert not list(tmp_path.glob("*.so"))
+
+
+def test_max_fp_iters_option_reaches_driver_flags(tmp_path):
+    model = LinearMLP()
+    x = torch.randn(4, 16)
+    with torch.no_grad():
+        compiled = torch.compile(
+            model,
+            backend="mimir",
+            options={"max_fp_iters": 64, "cache": False, "cache_dir": str(tmp_path)},
+        )
+        torch.testing.assert_close(compiled(x), model(x), rtol=1e-4, atol=1e-4)
+
+
+def test_profile_is_emitted_when_fixed_point_fails(tmp_path, capsys):
+    model = LinearMLP()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(
+        model,
+        backend="mimir",
+        options={
+            "max_fp_iters": 1,
+            "profile": "summary",
+            "cache": False,
+            "cache_dir": str(tmp_path),
+        },
+    )
+
+    with pytest.raises(Exception, match="fixed point"):
+        compiled(x)
+    assert "phase profile" in capsys.readouterr().err
 
 
 def test_profile_summary_prints_report(tmp_path, capsys):
