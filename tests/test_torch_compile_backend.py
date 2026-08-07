@@ -9,9 +9,12 @@ import shutil
 import pytest
 import torch
 
-from mimir_frontend.backend import mimir_backend
+from mimir_frontend.backend import _shared_lib_suffix, mimir_backend
 
 pytestmark = pytest.mark.skipif(shutil.which("clang") is None, reason="clang not on PATH")
+
+# .so on Linux, .dylib on macOS, .dll on Windows — must match what the backend emits.
+LIB_SUFFIX = _shared_lib_suffix()
 
 
 class LinearMLP(torch.nn.Module):
@@ -40,6 +43,9 @@ class SmallConv(torch.nn.Module):
 def _reset_dynamo(monkeypatch, tmp_path_factory):
     # Hermetic per-test-run JIT cache: don't read from or pollute the user cache.
     monkeypatch.setenv("MIMIR_CACHE_DIR", str(tmp_path_factory.getbasetemp() / "mimir-jit-cache"))
+    # Ambient profiling/debugging would force cache bypasses and stray dumps.
+    monkeypatch.delenv("MIMIR_PROFILE", raising=False)
+    monkeypatch.delenv("MIMIR_DEBUG_DIR", raising=False)
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()
@@ -117,7 +123,7 @@ def test_cache_hit_reuses_compiled_so(tmp_path):
         got_a = torch.compile(model_a, backend="mimir", options={"cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got_a, model_a(x), rtol=1e-4, atol=1e-4)
 
-    so_files = list(tmp_path.glob("*.so"))
+    so_files = list(tmp_path.glob(f"*{LIB_SUFFIX}"))
     assert len(so_files) == 1
     first_mtime = so_files[0].stat().st_mtime_ns
 
@@ -129,7 +135,7 @@ def test_cache_hit_reuses_compiled_so(tmp_path):
         got_b = torch.compile(model_b, backend="mimir", options={"cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got_b, model_b(x), rtol=1e-4, atol=1e-4)
 
-    so_files = list(tmp_path.glob("*.so"))
+    so_files = list(tmp_path.glob(f"*{LIB_SUFFIX}"))
     assert len(so_files) == 1
     assert so_files[0].stat().st_mtime_ns == first_mtime, "cache entry was rebuilt instead of reused"
     assert not torch.allclose(got_a, got_b), "different weights must give different results"
@@ -141,7 +147,7 @@ def test_cache_can_be_disabled(tmp_path):
     with torch.no_grad():
         got = torch.compile(model, backend="mimir", options={"cache": False, "cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got, model(x), rtol=1e-4, atol=1e-4)
-    assert not list(tmp_path.glob("*.so"))
+    assert not list(tmp_path.glob(f"*{LIB_SUFFIX}"))
 
 
 def test_profile_summary_prints_report(tmp_path, capsys):
@@ -179,6 +185,6 @@ def test_debug_dir_dumps_artifacts(tmp_path):
         want = model(x)
     torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
 
-    for suffix in ("_pre.mim", "_post.mim", ".ll", ".so"):
+    for suffix in ("_pre.mim", "_post.mim", ".ll", LIB_SUFFIX):
         matches = list(tmp_path.glob(f"mimir_graph_*{suffix}"))
         assert matches, f"expected a mimir_graph_*{suffix} artifact in {tmp_path}"
