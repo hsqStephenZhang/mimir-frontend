@@ -7,6 +7,7 @@ from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode
 from pathlib import Path
 import tempfile
+from mim._plugins.math import math
 
 from mimir_frontend.translator import FXGraphTranslator
 
@@ -448,7 +449,25 @@ def test_real_aten_scalar_mul_overload():
     assert "%torch.mul_scalar_op" in def_to_string(result)
 
 
-def test_addmm_decomposes_to_mm_and_add():
+@pytest.mark.parametrize("dtype_name", ["F32", "F64"])
+def test_torch_scalar_semantics_are_resolved_in_mimir(dtype_name):
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    elem_type = world.annex(getattr(math, dtype_name).value)
+    lhs, rhs = make_static_inputs_with_shapes(
+        world, [(2, 3), (2, 3)], elem_type=elem_type
+    )
+
+    result = ops.add(lhs, rhs)
+    ir = def_to_string(result)
+
+    assert tensor_element_type(result) == elem_type
+    assert "%core.resolve" not in ir
+    assert not hasattr(ops, "torch_arithmetic")
+    assert not hasattr(ops, "torch_floating")
+
+
+def test_addmm_maps_directly_to_torch_dialect():
     class Model(torch.nn.Module):
         def forward(self, bias, x, y):
             return torch.ops.aten.addmm.default(bias, x, y)
@@ -458,7 +477,29 @@ def test_addmm_decomposes_to_mm_and_add():
     result = translate_model(Model(), [bias, x, y])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%torch.mm_op", "%torch.add_op"])
+    ir = def_to_string(result)
+    assert "%torch.addmm_op" in ir
+    assert "%torch.mm_op" not in ir
+    assert "%torch.add_op" not in ir
+
+
+@pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
+def test_addmm_preserves_self_broadcast_mapping(self_shape):
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, mat1, mat2):
+            return torch.ops.aten.addmm.default(
+                self_tensor, mat1, mat2, beta=0.5, alpha=2.0
+            )
+
+    world = make_world()
+    self_tensor, mat1, mat2 = make_static_inputs_with_shapes(
+        world, [self_shape, (2, 3), (3, 4)]
+    )
+
+    result = translate_model(Model(), [self_tensor, mat1, mat2])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.addmm_op" in def_to_string(result)
 
 
 def test_rank4_matmul_maps_directly_to_torch_matmul():
@@ -981,7 +1022,7 @@ def test_lenet_style_cnn_with_pooling_translates():
             "%torch.convolution_op",
             "%tensor.pool",
             "%torch.reshape_op",
-            "%torch.mm_op",
+            "%torch.addmm_op",
         ],
     )
 

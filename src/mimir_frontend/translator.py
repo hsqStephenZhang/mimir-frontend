@@ -196,6 +196,7 @@ class FXGraphTranslator:
         m[operator.matmul] = self._wrap_binary(self.ops.matmul)
         m["aten.mm.default"] = self._wrap_binary(self.ops.mm)
         m["aten.matmul.default"] = self._wrap_binary(self.ops.matmul)
+        m[torch.addmm] = self._wrap_addmm()
         m["aten.addmm.default"] = self._wrap_addmm()
         if hasattr(torch, "_C") and hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "linear"):
             m[torch._C._nn.linear] = self._wrap_linear()
@@ -279,12 +280,12 @@ class FXGraphTranslator:
     def _wrap_addmm(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            bias, input, mat2 = args[:3]
-            out_features = self.ops.shape_of(mat2)[1]
-            batch = self.ops.shape_of(input)[0]
-            bias_row = self.ops.reshape(bias, [1, out_features])
-            bias_expanded = self.ops.repeat(bias_row, [batch, out_features])
-            return self.ops.add(self.ops.mm(input, mat2), bias_expanded)
+            self_tensor, mat1, mat2 = args[:3]
+            beta = args[3] if len(args) > 3 else node.kwargs.get("beta", 1)
+            alpha = args[4] if len(args) > 4 else node.kwargs.get("alpha", 1)
+            return self.ops.addmm(
+                self_tensor, mat1, mat2, beta=beta, alpha=alpha
+            )
         return convert
 
     def _wrap_linear(self):

@@ -36,6 +36,18 @@ class SmallConv(torch.nn.Module):
         return self.fc(x)
 
 
+class AddMM(torch.nn.Module):
+    def __init__(self, *, beta=1.0, alpha=1.0):
+        super().__init__()
+        self.beta = beta
+        self.alpha = alpha
+
+    def forward(self, self_tensor, mat1, mat2):
+        return torch.addmm(
+            self_tensor, mat1, mat2, beta=self.beta, alpha=self.alpha
+        )
+
+
 class TinyAttentionFFN(torch.nn.Module):
     """A transformer-style block without LayerNorm, for frontend coverage."""
 
@@ -97,6 +109,25 @@ def check_against_eager(model, *inputs, options=None):
 
 def test_linear_mlp_matches_eager():
     check_against_eager(LinearMLP(), torch.randn(4, 16))
+
+
+@pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
+def test_addmm_matches_eager(self_shape):
+    check_against_eager(
+        AddMM(beta=0.5, alpha=2.0),
+        torch.randn(*self_shape),
+        torch.randn(2, 3),
+        torch.randn(3, 4),
+    )
+
+
+def test_addmm_beta_zero_does_not_propagate_self_nan():
+    check_against_eager(
+        AddMM(beta=0.0, alpha=1.5),
+        torch.full((4,), float("nan")),
+        torch.randn(2, 3),
+        torch.randn(3, 4),
+    )
 
 
 @pytest.mark.parametrize("shape", [(4, 8), (2, 4, 8)])
