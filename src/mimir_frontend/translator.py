@@ -84,6 +84,10 @@ class FXGraphTranslator:
             if name: m[name] = wrapper
         m[operator.neg] = self._wrap_unary(self.ops.neg)
         m["aten.relu_.default"] = self._wrap_unary(self.ops.relu)
+        gelu = self._wrap_gelu()
+        m[torch.nn.functional.gelu] = gelu
+        m["gelu"] = gelu
+        m["aten.gelu.default"] = gelu
 
         # Prims
         if hasattr(torch.ops, "prims") and hasattr(torch.ops.prims, "convert_element_type"):
@@ -99,8 +103,9 @@ class FXGraphTranslator:
         # Injective
         m[torch.cat] = self._wrap_cat()
         m["aten.cat.default"] = self._wrap_cat()
-        m[torch.permute] = self._wrap_transpose()
-        m["aten.permute.default"] = self._wrap_transpose()
+        m[torch.permute] = self._wrap_permute()
+        m["permute"] = self._wrap_permute()
+        m["aten.permute.default"] = self._wrap_permute()
         m["aten.transpose.int"] = self._wrap_transpose()
         m["t"] = self._wrap_t()
         m["transpose"] = self._wrap_transpose()
@@ -111,6 +116,14 @@ class FXGraphTranslator:
         m["view"] = self._wrap_reshape()
         m["aten.view.default"] = self._wrap_reshape()
         m["aten._unsafe_view.default"] = self._wrap_reshape()
+        m["repeat"] = self._wrap_repeat()
+        m["aten.repeat.default"] = self._wrap_repeat()
+        m[torch.diff] = self._wrap_diff()
+        m["diff"] = self._wrap_diff()
+        m["aten.diff.default"] = self._wrap_diff()
+        m[torch.cumsum] = self._wrap_cumsum()
+        m["cumsum"] = self._wrap_cumsum()
+        m["aten.cumsum.default"] = self._wrap_cumsum()
         m[torch.flatten] = self._wrap_flatten()
         m["aten.flatten.using_ints"] = self._wrap_flatten()
         m["flatten"] = self._wrap_flatten()
@@ -151,9 +164,14 @@ class FXGraphTranslator:
         m["aten.expand.default"] = self._wrap_expand()
         m["expand"] = self._wrap_expand()
         m[torch.full] = self._wrap_full()
+        m[torch.tensor] = self._wrap_tensor_constant()
         m["aten.full.default"] = self._wrap_full()
         m[torch.zeros] = self._wrap_zeros()
         m["aten.zeros.default"] = self._wrap_zeros()
+        m["new_ones"] = self._wrap_new_fill(1)
+        m["aten.new_ones.default"] = self._wrap_new_fill(1)
+        m["new_zeros"] = self._wrap_new_fill(0)
+        m["aten.new_zeros.default"] = self._wrap_new_fill(0)
         m["aten.empty_strided.default"] = self._wrap_empty_strided()
         m["aten.fill.Scalar"] = self._wrap_fill_scalar()
         m[torch.arange] = self._wrap_arange()
@@ -225,11 +243,16 @@ class FXGraphTranslator:
 
         # Convolution
         m[torch.convolution] = self._wrap_convolution()
+        if hasattr(torch, "conv1d"):
+            m[torch.conv1d] = self._wrap_conv1d()
         if hasattr(torch, "conv2d"):
             m[torch.conv2d] = self._wrap_conv2d()
+        m[torch.nn.functional.conv1d] = self._wrap_conv1d()
         m[torch.nn.functional.conv2d] = self._wrap_conv2d()
         m["aten.convolution.default"] = self._wrap_convolution()
+        m["aten.conv1d.default"] = self._wrap_conv1d()
         m["aten.conv2d.default"] = self._wrap_conv2d()
+        m["conv1d"] = self._wrap_conv1d()
         m["conv2d"] = self._wrap_conv2d()
 
         # Pooling
@@ -348,6 +371,27 @@ class FXGraphTranslator:
         return convert
 
     def _wrap_conv2d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            weight = args[1]
+            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            stride = args[3] if len(args) > 3 else node.kwargs.get("stride", 1)
+            padding = args[4] if len(args) > 4 else node.kwargs.get("padding", 0)
+            dilation = args[5] if len(args) > 5 else node.kwargs.get("dilation", 1)
+            groups = args[6] if len(args) > 6 else node.kwargs.get("groups", 1)
+            return self.ops.convolution(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            )
+        return convert
+
+    def _wrap_conv1d(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             x = args[0]
@@ -500,6 +544,17 @@ class FXGraphTranslator:
             return op_func(args[0])
         return convert
 
+    def _wrap_gelu(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            approximate = (
+                args[1]
+                if len(args) > 1
+                else node.kwargs.get("approximate", "none")
+            )
+            return self.ops.gelu(args[0], approximate=approximate)
+        return convert
+
     def _wrap_reduction(self, op_func):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -622,6 +677,44 @@ class FXGraphTranslator:
             return self.ops.transpose(x, args[1])
         return convert
 
+    def _wrap_permute(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            # Tensor.permute exposes dimensions as variadic method arguments;
+            # torch.permute and aten.permute use one tuple/list argument.
+            permutation = args[1] if len(args) == 2 else list(args[1:])
+            return self.ops.transpose(args[0], permutation)
+        return convert
+
+    def _wrap_repeat(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            repeats = args[1] if len(args) == 2 else args[1:]
+            return self.ops.repeat(args[0], repeats)
+        return convert
+
+    def _wrap_diff(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            return self.ops.diff(
+                args[0],
+                n=args[1] if len(args) > 1 else kwargs.get("n", 1),
+                dim=args[2] if len(args) > 2 else kwargs.get("dim", -1),
+                prepend=args[3] if len(args) > 3 else kwargs.get("prepend"),
+                append=args[4] if len(args) > 4 else kwargs.get("append"),
+            )
+        return convert
+
+    def _wrap_cumsum(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            dim = args[1] if len(args) > 1 else kwargs.get("dim")
+            dtype = args[2] if len(args) > 2 else kwargs.get("dtype")
+            return self.ops.cumsum(args[0], dim, dtype=dtype)
+        return convert
+
     def _wrap_getitem(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -631,8 +724,12 @@ class FXGraphTranslator:
             # Check if obj is a tensor by inspecting its type
             ty = obj.type()
             
-            if isinstance(ty, (mim.Arr, mim.Seq)):
+            if isinstance(ty, (mim.Arr, mim.Seq)) or obj in self.ops._shape_cache:
                 # Handle tensor indexing/slicing
+                if isinstance(index, mim.Def) and isinstance(
+                    index.type(), (mim.Arr, mim.Seq)
+                ):
+                    return self.ops.index_tensor(obj, index)
                 if isinstance(index, int):
                     return self.ops.select(obj, 0, index)
                 elif isinstance(index, slice):
@@ -651,6 +748,13 @@ class FXGraphTranslator:
                         index[ellipsis:ellipsis + 1] = [slice(None)] * fill
                     else:
                         index.extend([slice(None)] * (rank - consumed))
+
+                    if (
+                        rank == 2
+                        and len(index) == 2
+                        and all(isinstance(item, mim.Def) for item in index)
+                    ):
+                        return self.ops.index_2d(obj, index[0], index[1])
 
                     res = obj
                     axis = 0
@@ -876,6 +980,19 @@ class FXGraphTranslator:
             return self.ops.full(shape, fill_value, dtype=dtype)
         return convert
 
+    def _wrap_tensor_constant(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            value = args[0]
+            if isinstance(value, (list, tuple)):
+                raise NotImplementedError("torch.tensor currently supports scalar constants")
+            device = kwargs.get("device")
+            if device is not None and torch.device(device).type != "cpu":
+                raise NotImplementedError("torch.tensor currently supports CPU tensors")
+            return self.ops.full([], value, dtype=kwargs.get("dtype"))
+        return convert
+
     def _wrap_zeros(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -899,6 +1016,25 @@ class FXGraphTranslator:
                 0,
                 dtype=node.kwargs.get("dtype"),
             )
+        return convert
+
+    def _wrap_new_fill(self, fill_value):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            reference = args[0]
+            shape = args[1] if len(args) == 2 else args[1:]
+            dtype = kwargs.get("dtype")
+            if dtype is None:
+                elem_type = self.ops._tensor_element_type(reference)
+                dtype = {
+                    self.ops.F32: torch.float32,
+                    self.ops.I64: torch.int64,
+                    self.ops.Bool: torch.bool,
+                }.get(elem_type)
+            if dtype is None:
+                raise NotImplementedError("new_ones/new_zeros cannot infer dtype")
+            return self.ops.full(shape, fill_value, dtype=dtype)
         return convert
 
     def _wrap_empty_strided(self):

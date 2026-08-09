@@ -107,8 +107,14 @@ class OperatorLibrary:
         return self._lit_nat(len(dims)), self.world.tuple(dims)
 
     def _physical_dims(self, dims):
-        """Drop literal singleton axes from a logical tensor shape."""
-        return [dim for dim in dims if not self._is_lit_nat_value(dim, 1)]
+        """Drop folded singleton axes while preserving tensor-vs-scalar rank."""
+        physical = [dim for dim in dims if not self._is_lit_nat_value(dim, 1)]
+        if not physical and dims:
+            # Nested singleton arrays normalize to their element type, but a
+            # logical tensor still needs one extent-1 loop axis. Rank zero is
+            # reserved for genuine scalar tensors.
+            return [dims[-1]]
+        return physical
 
     def _rank_and_type_shape(self, tensor_def):
         dims = self._shape_dims(tensor_def)
@@ -291,6 +297,21 @@ class OperatorLibrary:
         physical_dims = self._physical_dims(output_dims)
         rank = self._lit_nat(len(physical_dims))
         shape = self.world.tuple(physical_dims)
+        elem_type = self._tensor_element_type(lhs)
+        if elem_type == self.I64:
+            i64_comparisons = {
+                "eq_op": "eq_i64_op", "ne_op": "ne_i64_op",
+                "lt_op": "lt_i64_op", "le_op": "le_i64_op",
+                "gt_op": "gt_i64_op", "ge_op": "ge_i64_op",
+            }
+            if name not in i64_comparisons:
+                raise NotImplementedError(f"{name} is not implemented for int64 tensors")
+            callee = self.world.annex(
+                getattr(torch_dialect, i64_comparisons[name]).value
+            )
+            callee = self._apply_grouped(callee, [rank, shape])
+            result = self.world.app(callee, self.world.tuple([lhs, rhs]))
+            return self._remember_shape(result, output_dims)
         callee = self.world.annex(getattr(torch_dialect, name).value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(callee, [rank, shape])
@@ -316,11 +337,15 @@ class OperatorLibrary:
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(input)
         if elem_type == self.I64:
-            if name != "add_scalar_op":
+            if name not in ("add_scalar_op", "sub_scalar_op", "ne_scalar_op"):
                 raise NotImplementedError(
                     f"{name} is not implemented for int64 tensors"
                 )
-            name = "add_i64_scalar_op"
+            name = {
+                "add_scalar_op": "add_i64_scalar_op",
+                "sub_scalar_op": "sub_i64_scalar_op",
+                "ne_scalar_op": "ne_i64_scalar_op",
+            }[name]
         callee = self.world.annex(getattr(torch_dialect, name).value)
         if elem_type != self.I64:
             callee = self.world.app(
@@ -401,7 +426,10 @@ class OperatorLibrary:
         if isinstance(lhs, (int, float)):
             return self._torch_scalar("add_scalar_op", rhs, lhs)
         return self._torch_binary("add_op", lhs, rhs)
-    def sub(self, lhs, rhs): return self._torch_binary("sub_op", lhs, rhs)
+    def sub(self, lhs, rhs):
+        if isinstance(rhs, (int, float)):
+            return self._torch_scalar("sub_scalar_op", lhs, rhs)
+        return self._torch_binary("sub_op", lhs, rhs)
     def mul(self, lhs, rhs):
         if isinstance(rhs, (int, float)):
             return self._torch_scalar("mul_scalar_op", lhs, rhs)
@@ -418,7 +446,13 @@ class OperatorLibrary:
     
     # Comparison
     def eq(self, lhs, rhs): return self._torch_binary("eq_op", lhs, rhs, out_type=self.Bool)
-    def ne(self, lhs, rhs): return self._torch_binary("ne_op", lhs, rhs, out_type=self.Bool)
+    def ne(self, lhs, rhs):
+        if (
+            isinstance(rhs, (int, float))
+            and self._tensor_element_type(lhs) == self.I64
+        ):
+            return self._torch_scalar("ne_scalar_op", lhs, rhs)
+        return self._torch_binary("ne_op", lhs, rhs, out_type=self.Bool)
     def lt(self, lhs, rhs): return self._torch_binary("lt_op", lhs, rhs, out_type=self.Bool)
     def le(self, lhs, rhs): return self._torch_binary("le_op", lhs, rhs, out_type=self.Bool)
     def gt(self, lhs, rhs): return self._torch_binary("gt_op", lhs, rhs, out_type=self.Bool)
@@ -465,6 +499,23 @@ class OperatorLibrary:
     def neg(self, x): return self._torch_unary("neg_op", x)
     def sigmoid(self, x): return self._torch_unary("sigmoid_op", x, floating=True)
     def silu(self, x): return self._torch_unary("silu_op", x, floating=True)
+    def gelu(self, x, *, approximate="none"):
+        """Map PyTorch GELU's string mode to a PE-visible Torch dialect flag."""
+        if approximate not in ("none", "tanh"):
+            raise ValueError(f"unsupported GELU approximation mode: {approximate!r}")
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        callee = self.world.annex(torch_dialect.gelu_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple([self.world.lit_bool(approximate == "tanh"), x]),
+        )
+        return self._remember_shape(result, dims)
     def rsqrt(self, x): return self._torch_unary("rsqrt_op", x, floating=True)
     
     def relu(self, x):
@@ -538,9 +589,28 @@ class OperatorLibrary:
             %tensor.select @T @(rank, shape) (cond, x, y)
         """
         cond_dims = self.shape_of(cond)
-        x_dims = self.shape_of(x)
-        y_dims = self.shape_of(y)
+        x_dims = [] if isinstance(x, (int, float, bool)) else self.shape_of(x)
+        y_dims = [] if isinstance(y, (int, float, bool)) else self.shape_of(y)
         output_dims = self.rules.broadcast_shape(self.rules.broadcast_shape(cond_dims, x_dims), y_dims)
+
+        value = x if isinstance(x, mim.Def) else y
+        if not isinstance(value, mim.Def):
+            raise TypeError("torch.where requires at least one tensor value branch")
+        elem_type = self._tensor_element_type(value)
+        dtype = {
+            self.F32: torch.float32,
+            self.F64: torch.float64,
+            self.I64: torch.int64,
+            self.Bool: torch.bool,
+        }.get(elem_type)
+        if dtype is None:
+            raise NotImplementedError(f"torch.where element type {elem_type}")
+        if isinstance(x, (int, float, bool)):
+            x = self.full(output_dims, x, dtype=dtype)
+            x_dims = output_dims
+        if isinstance(y, (int, float, bool)):
+            y = self.full(output_dims, y, dtype=dtype)
+            y_dims = output_dims
 
         if not self.rules.same_shape(cond_dims, output_dims):
             cond = self.expand(cond, output_dims)
@@ -617,13 +687,19 @@ class OperatorLibrary:
         # A scalar tensor has no index tuple.  Keep the established tensor
         # map path for this case; `%torch.expand_op` requires an array input.
         if in_rank_val == 0:
-            callee = self.world.annex(tensor.map.value)
-            callee = self._apply_grouped(callee, [elem_type, self._lit_nat(0), self.world.tuple([])])
-            lam = self.world.mut_lam(self.world.sigma([]), elem_type)
-            lam.set_body(True, input)
-            callee = self.world.app(callee, lam)
-            callee = self.world.app(callee, self.world.tuple([out_rank, out_shape_tuple]))
-            result = self.world.app(callee, self.world.tuple([]))
+            if input.type() == elem_type:
+                scalar = input
+            else:
+                getter = self.world.annex(tensor.get.value)
+                getter = self._apply_grouped(
+                    getter, [elem_type, self._lit_nat(0), self.world.tuple([])]
+                )
+                scalar = self.world.app(
+                    getter, self.world.tuple([input, self.world.tuple([])])
+                )
+            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self._apply_grouped(callee, [elem_type, out_rank])
+            result = self.world.app(callee, [out_shape_tuple, scalar])
             return self._remember_shape(result, shape)
 
         if in_dims == shape:
@@ -694,11 +770,16 @@ class OperatorLibrary:
         elif dtype == torch.bool:
             elem_type = self.Bool
             scalar_def = self.world.lit_tt() if fill_value else self.world.lit_ff()
+        elif dtype in (torch.int64, torch.long):
+            elem_type = self.I64
+            scalar_def = self.world.lit_i64(int(fill_value))
         else:
             raise NotImplementedError(f"full with dtype {dtype} is not implemented")
 
-        callee = self.world.annex(torch_dialect.full_op.value)
         out_shape_tuple, out_rank_val = self._extract_shape(shape)
+        if out_rank_val == 0:
+            return self._remember_shape(scalar_def, [])
+        callee = self.world.annex(torch_dialect.full_op.value)
         callee = self._apply_grouped(callee, [elem_type, self._lit_nat(out_rank_val)])
         callee = self.world.app(callee, [out_shape_tuple, scalar_def])
         return self._remember_shape(callee, shape)
@@ -1606,8 +1687,18 @@ class OperatorLibrary:
     def convolution(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         semantic_in_dims = self.shape_of(x)
         weight_dims = self.shape_of(weight)
+        if len(semantic_in_dims) == 3 and len(weight_dims) == 3:
+            return self.convolution1d(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            )
         if len(semantic_in_dims) != 4 or len(weight_dims) != 4:
-            raise NotImplementedError("aten.convolution currently supports 4D NCHW inputs only")
+            raise NotImplementedError("aten.convolution currently supports rank-3 NCL and rank-4 NCHW inputs")
 
         type_in_dims = self._shape_dims(x)
         if len(type_in_dims) == 3 and self._is_lit_nat_value(semantic_in_dims[0], 1):
@@ -1652,6 +1743,51 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
+    def convolution1d(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        semantic_in_dims = self.shape_of(x)
+        weight_dims = self.shape_of(weight)
+        type_in_dims = self._shape_dims(x)
+        if len(type_in_dims) == 2 and self._is_lit_nat_value(semantic_in_dims[0], 1):
+            in_dims = [semantic_in_dims[0], type_in_dims[0], type_in_dims[1]]
+        else:
+            in_dims = semantic_in_dims
+
+        stride = self._single(stride, "stride")
+        padding = self._single(padding, "padding")
+        dilation = self._single(dilation, "dilation")
+        n, cin, length = in_dims
+        cout, cin_per_group, kernel = weight_dims
+        out_length = self._conv2d_dim(length, kernel, stride, dilation, padding)
+        out_dims = [n, cout, out_length]
+
+        callee = self.world.annex(torch_dialect.convolution1d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee, [n, cin, cout, cin_per_group, length, kernel]
+        )
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._to_nat(stride),
+                self._to_nat(padding),
+                self._to_nat(dilation),
+                self.world.lit_bool(False),
+                self._lit_nat(0),
+                self._to_nat(groups),
+            ],
+        )
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
+
     def _to_nat(self, value):
         return self._lit_nat(value) if isinstance(value, int) else value
 
@@ -1661,6 +1797,13 @@ class OperatorLibrary:
         if isinstance(value, (list, tuple)) and len(value) == 2:
             return tuple(value)
         raise NotImplementedError(f"{name} must be an int or length-2 sequence")
+
+    def _single(self, value, name):
+        if isinstance(value, int):
+            return value
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return value[0]
+        raise NotImplementedError(f"{name} must be an int or length-1 sequence")
 
     def _nat_binop(self, op, lhs, rhs):
         return self.world.call(op, [self._to_nat(lhs), self._to_nat(rhs)])
@@ -1829,21 +1972,121 @@ class OperatorLibrary:
             raise NotImplementedError("avg_pool2d divisor_override is not implemented")
         return self.pool2d(x, kernel_size, stride=stride, padding=padding, dilation=1, mode="avg")
 
-    def repeat(self, x, shape):
+    def repeat(self, x, repeats):
         in_dims = self.shape_of(x)
-        out_dims = list(shape)
-        if len(in_dims) != len(out_dims):
-            raise NotImplementedError("repeat currently requires input and output ranks to match")
+        repeats = list(repeats)
+        if len(repeats) < len(in_dims):
+            raise ValueError(
+                f"repeat dimensions ({len(repeats)}) cannot be fewer than "
+                f"input dimensions ({len(in_dims)})"
+            )
+        aligned_dims = [self._lit_nat(1)] * (len(repeats) - len(in_dims)) + in_dims
+        repeat_defs = [
+            value if isinstance(value, mim.Def) else self._lit_nat(value)
+            for value in repeats
+        ]
+        out_dims = [
+            self._nat_binop(core.nat.mul, extent, count)
+            for extent, count in zip(aligned_dims, repeat_defs)
+        ]
 
-        in_rank, in_shape_tuple = self._rank_and_shape(x)
-        out_shape_tuple, _ = self._extract_shape(out_dims)
-        callee = self.world.annex(tensor.repeat.value)
+        rank = self._lit_nat(len(repeats))
+        in_shape_tuple = self.world.tuple(aligned_dims)
+        callee = self.world.annex(torch_dialect.repeat_op.value)
         elem_t = self._tensor_element_type(x)
-        callee = self._apply_grouped(callee, [elem_t, in_rank])
-        callee = self.world.app(callee, in_shape_tuple)
-        callee = self.world.app(callee, out_shape_tuple)
+        callee = self._apply_grouped(callee, [elem_t, rank, in_shape_tuple])
+        callee = self.world.app(callee, self.world.tuple(repeat_defs))
         result = self.world.app(callee, x)
         return self._remember_shape(result, out_dims)
+
+    def diff(self, input, *, n=1, dim=-1, prepend=None, append=None):
+        if append is not None:
+            raise NotImplementedError("torch.diff append is not implemented")
+        input_dims = self.shape_of(input)
+        rank_val = len(input_dims)
+        canonical_dim = dim + rank_val if dim < 0 else dim
+        if canonical_dim < 0 or canonical_dim >= rank_val:
+            raise ValueError(f"torch.diff dim {dim} is out of range for rank {rank_val}")
+        if prepend is None:
+            prepend = self.slice(input, canonical_dim, 0, 0)
+        prepend_dims = self.shape_of(prepend)
+        if len(prepend_dims) != rank_val:
+            raise ValueError("torch.diff prepend rank must match input rank")
+
+        physical_axes = [
+            axis
+            for axis, extent in enumerate(input_dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and input_dims:
+            physical_axes = [len(input_dims) - 1]
+        if canonical_dim not in physical_axes:
+            raise NotImplementedError("torch.diff over a folded singleton axis")
+        physical_input_dims = [input_dims[axis] for axis in physical_axes]
+        physical_prepend_dims = [prepend_dims[axis] for axis in physical_axes]
+        physical_dim = physical_axes.index(canonical_dim)
+
+        output_dims = list(input_dims)
+        combined = self._nat_binop(
+            core.nat.add, input_dims[canonical_dim], prepend_dims[canonical_dim]
+        )
+        output_dims[canonical_dim] = self._nat_binop(core.nat.sub, combined, 1)
+
+        elem_type = self._tensor_element_type(input)
+        name = "diff_i64_op" if elem_type == self.I64 else "diff_op"
+        callee = self.world.annex(getattr(torch_dialect, name).value)
+        if elem_type != self.I64:
+            callee = self.world.app(callee, self._torch_semantics(input))
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._lit_nat(len(physical_input_dims)),
+                self.world.tuple(physical_input_dims),
+                self.world.tuple(physical_prepend_dims),
+            ],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([self._lit_nat(n), self.world.lit_i64(physical_dim)]),
+        )
+        result = self.world.app(callee, self.world.tuple([input, prepend]))
+        return self._remember_shape(result, output_dims)
+
+    def cumsum(self, input, dim, *, dtype=None):
+        if self._tensor_element_type(input) != self.Bool:
+            raise NotImplementedError("cumsum currently supports boolean input")
+        if dtype not in (None, torch.int64, torch.long):
+            raise NotImplementedError(
+                f"boolean cumsum only supports the default int64 result, got {dtype}"
+            )
+        dims = self.shape_of(input)
+        rank_val = len(dims)
+        canonical_dim = dim + rank_val if dim < 0 else dim
+        if canonical_dim < 0 or canonical_dim >= rank_val:
+            raise ValueError(f"cumsum dim {dim} is out of range for rank {rank_val}")
+        physical_axes = [
+            axis
+            for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and dims:
+            physical_axes = [len(dims) - 1]
+        if canonical_dim not in physical_axes:
+            raise NotImplementedError("cumsum over a folded singleton axis")
+        physical_dims = [dims[axis] for axis in physical_axes]
+        physical_dim = physical_axes.index(canonical_dim)
+        if len(physical_dims) == 1:
+            callee = self.world.annex(torch_dialect.cumsum_bool_i64_1d_op.value)
+            callee = self.world.app(callee, physical_dims[0])
+        else:
+            callee = self.world.annex(torch_dialect.cumsum_bool_i64_op.value)
+            callee = self._apply_grouped(
+                callee,
+                [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+            )
+            callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+        result = self.world.app(callee, input)
+        return self._remember_shape(result, dims)
 
     def gather(self, input, index, dim=0):
         input_dims = self.shape_of(input)
@@ -1883,16 +2126,54 @@ class OperatorLibrary:
             return self.select(input, 0, index)
         if len(input_dims) < 1:
             raise NotImplementedError("aten.index.Tensor requires tensor input")
+        if len(input_dims) == 2 and self._tensor_element_type(index) == self.I64:
+            # The common weight[position_ids] form is exactly inference
+            # embedding semantics, including checked I64-to-index conversion.
+            return self.embedding(input, index)
 
-        # PyTorch `x[idx]` indexes dim 0 and preserves trailing input dimensions.
+        # PyTorch `x[idx]` replaces dim 0 by every index dimension and preserves
+        # trailing input dimensions. Align both operands to the output rank so
+        # the tensor dialect's same-rank gather can express that rule.
         output_dims = index_dims + input_dims[1:]
+        prefix_dims = index_dims[:-1]
+        input_aligned_dims = [self._lit_nat(1)] * len(prefix_dims) + input_dims
+        input = self.reshape(input, input_aligned_dims)
+        input = self.expand(input, prefix_dims + input_dims)
         gather_index = index
         for _ in input_dims[1:]:
             gather_index = self.unsqueeze(gather_index, -1)
-        if len(output_dims) != len(self.shape_of(gather_index)):
-            raise NotImplementedError("aten.index.Tensor rank normalization failed")
         gather_index = self.expand(gather_index, output_dims)
-        return self.gather(input, gather_index, dim=0)
+        return self.gather(input, gather_index, dim=len(prefix_dims))
+
+    def index_2d(self, input, rows, columns):
+        input_dims = self.shape_of(input)
+        if len(input_dims) != 2:
+            raise ValueError("index_2d expects a rank-2 input")
+        if self._tensor_element_type(rows) != self.I64:
+            raise TypeError("index_2d row indices must be int64")
+        if self._tensor_element_type(columns) != self.I64:
+            raise TypeError("index_2d column indices must be int64")
+        output_dims = self.rules.broadcast_shape(
+            self.shape_of(rows), self.shape_of(columns)
+        )
+        if self.shape_of(rows) != output_dims:
+            rows = self.expand(rows, output_dims)
+        if self.shape_of(columns) != output_dims:
+            columns = self.expand(columns, output_dims)
+
+        callee = self.world.annex(torch_dialect.index_2d_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._tensor_element_type(input),
+                input_dims[0],
+                input_dims[1],
+                self._lit_nat(len(output_dims)),
+                self.world.tuple(output_dims),
+            ],
+        )
+        result = self.world.app(callee, self.world.tuple([input, rows, columns]))
+        return self._remember_shape(result, output_dims)
 
     def scatter(self, input, dim, index, src):
         input_dims = self.shape_of(input)

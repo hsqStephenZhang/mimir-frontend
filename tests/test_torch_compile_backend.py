@@ -4,7 +4,11 @@ Each test lowers a Dynamo graph through MimIR to a shared library (requires
 clang on PATH) and compares the JIT-compiled result against eager PyTorch.
 """
 
+import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -140,6 +144,175 @@ def test_conv_matches_eager():
     check_against_eager(SmallConv(), torch.randn(2, 1, 8, 8))
 
 
+def test_conv1d_matches_eager():
+    check_against_eager(
+        torch.nn.Conv1d(4, 8, 3, stride=2, padding=1).eval(),
+        torch.randn(1, 4, 16),
+    )
+
+
+@pytest.mark.parametrize("approximate", ["none", "tanh"])
+def test_gelu_matches_eager(approximate):
+    class Gelu(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.gelu(x, approximate=approximate)
+
+    check_against_eager(Gelu(), torch.linspace(-3, 3, 24).reshape(2, 3, 4))
+
+
+def test_repeat_matches_eager():
+    class Repeat(torch.nn.Module):
+        def forward(self, x):
+            return x.repeat(2, 1, 3)
+
+    check_against_eager(Repeat(), torch.arange(20.0).reshape(4, 5))
+
+
+def test_getitem_tensor_index_matches_eager():
+    class Index(torch.nn.Module):
+        def forward(self, weight, index):
+            return weight[index]
+
+    check_against_eager(
+        Index(),
+        torch.arange(32.0).reshape(8, 4),
+        torch.tensor([[0, 3, 7], [2, 1, 5]]),
+    )
+
+
+def test_i64_tensor_scalar_sub_matches_eager():
+    class Sub(torch.nn.Module):
+        def forward(self, weight, x):
+            return weight[x - 1]
+
+    check_against_eager(
+        Sub(),
+        torch.arange(40.0).reshape(10, 4),
+        torch.tensor([[1, 4, 9]], dtype=torch.int64),
+    )
+
+
+def test_diff_with_prepend_matches_eager():
+    class Diff(torch.nn.Module):
+        def forward(self, x, prepend):
+            return torch.diff(x, dim=-1, prepend=prepend)
+
+    check_against_eager(
+        Diff(),
+        torch.randn(2, 4),
+        torch.randn(2, 1),
+    )
+
+
+def test_i64_tensor_scalar_ne_matches_eager():
+    class Ne(torch.nn.Module):
+        def forward(self, mask, x, y):
+            return torch.where(mask != 1, x, y)
+
+    check_against_eager(
+        Ne(),
+        torch.tensor([[0, 1, 2]], dtype=torch.int64),
+        torch.randn(1, 3),
+        torch.randn(1, 3),
+    )
+
+
+def test_bool_cumsum_consumed_by_embedding_matches_eager():
+    class Cumsum(torch.nn.Module):
+        def forward(self, weight, mask):
+            return weight[torch.cumsum(mask != 1, dim=-1)]
+
+    check_against_eager(
+        Cumsum(),
+        torch.randn(8, 3),
+        torch.tensor([[0, 1, 2, 1]], dtype=torch.int64),
+    )
+
+
+def test_packed_sequence_indices_consumed_by_embedding_matches_eager():
+    class PackedSequence(torch.nn.Module):
+        def forward(self, weight, position_ids):
+            first_dummy = position_ids[:, :1] - 1
+            position_diff = torch.diff(
+                position_ids, prepend=first_dummy, dim=-1
+            )
+            packed = (position_diff != 1).cumsum(-1)
+            return weight[packed]
+
+    check_against_eager(
+        PackedSequence(),
+        torch.randn(4, 3),
+        torch.tensor([[0, 1, 0, 1, 2, 0]], dtype=torch.int64),
+    )
+
+
+def test_broadcasted_packed_sequence_indexing_matches_eager():
+    class PackedGrid(torch.nn.Module):
+        def forward(self, weight, position_ids):
+            first_dummy = position_ids[:, :1] - 1
+            packed = (
+                torch.diff(position_ids, prepend=first_dummy, dim=-1) != 1
+            ).cumsum(-1)
+            batch = torch.arange(position_ids.shape[0])[:, None, None, None]
+            query = torch.arange(position_ids.shape[1])[None, None, :, None]
+            key = torch.arange(position_ids.shape[1])[None, None, None, :]
+            return weight[packed[batch, query]] + weight[packed[batch, key]]
+
+    check_against_eager(
+        PackedGrid(),
+        torch.randn(4, 3),
+        torch.tensor([[0, 1, 0, 1]], dtype=torch.int64),
+    )
+
+
+def test_broadcast_i64_comparison_matches_eager():
+    class Compare(torch.nn.Module):
+        def forward(self, lhs, rhs, x, y):
+            return torch.where(lhs <= rhs, x, y)
+
+    check_against_eager(
+        Compare(),
+        torch.tensor([[0], [2]], dtype=torch.int64),
+        torch.tensor([[1, 3, 2]], dtype=torch.int64),
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+    )
+
+
+def test_rank0_bool_tensor_broadcast_matches_eager():
+    class ScalarMask(torch.nn.Module):
+        def forward(self, x):
+            mask = x.new_ones((), dtype=torch.bool)
+            return torch.where(mask, x, -x)
+
+    check_against_eager(ScalarMask(), torch.randn(2, 3))
+
+
+def test_two_tensor_advanced_index_matches_eager():
+    class Index2D(torch.nn.Module):
+        def forward(self, x, rows, columns):
+            return x[rows, columns]
+
+    check_against_eager(
+        Index2D(),
+        torch.randn(3, 4),
+        torch.tensor([[0], [2]], dtype=torch.int64),
+        torch.tensor([[0, 3, 1]], dtype=torch.int64),
+    )
+
+
+def test_where_tensor_and_python_scalar_matches_eager():
+    class WhereScalar(torch.nn.Module):
+        def forward(self, mask, x):
+            return torch.where(mask != 0, x, -3.5)
+
+    check_against_eager(
+        WhereScalar(),
+        torch.tensor([[0, 1, 0]], dtype=torch.int64),
+        torch.randn(2, 3),
+    )
+
+
 def test_batch_norm_residual_block_matches_eager():
     class ResidualBlock(torch.nn.Module):
         def __init__(self):
@@ -264,6 +437,32 @@ def test_embedding_with_i64_indices_matches_eager():
         torch.nn.Embedding(32, 16).eval(),
         torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.int64),
     )
+
+
+def test_embedding_out_of_range_reaches_compiled_runtime(tmp_path):
+    code = """
+import torch
+from mimir_frontend.backend import mimir_backend
+
+model = torch.nn.Embedding(4, 3).eval()
+indices = torch.tensor([[0, 4]], dtype=torch.int64)
+with torch.no_grad():
+    torch.compile(model, backend=mimir_backend)(indices)
+"""
+    env = os.environ.copy()
+    env["MIMIR_CACHE_DIR"] = str(tmp_path / "mimir-jit-cache")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "embedding index out of range" in output
+    assert "IndexError: index out of range in self" not in output
 
 
 def test_registered_by_name():

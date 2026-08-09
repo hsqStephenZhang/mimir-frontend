@@ -866,6 +866,154 @@ def test_embedding_translates_to_dim0_gather():
     assert "%torch.embedding_op" in def_to_string(result)
 
 
+def test_conv1d_translates_to_torch_convolution1d():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.conv1d(x, weight, bias, stride=2, padding=1)
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 16), (8, 4, 3), (8,)]
+    )
+
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 8, 8]
+    assert "%torch.convolution1d_op" in def_to_string(result)
+
+
+def test_gelu_translates_approximation_mode_to_static_flag():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.gelu(x, approximate="tanh")
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+
+    result = translate_model(Model(), [x])
+    text = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.gelu_op" in text
+    assert "tt" in text
+
+
+def test_tensor_permute_variadic_method_translates():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.permute(0, 2, 1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4, 3]
+    assert "%torch.permute_op" in def_to_string(result)
+
+
+def test_tensor_repeat_uses_counts_and_left_rank_alignment():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.repeat(2, 1, 3)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(4, 5)])[0]
+
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4, 15]
+    assert "%torch.repeat_op" in def_to_string(result)
+
+
+def test_getitem_tensor_index_translates_to_dim0_index():
+    class Model(torch.nn.Module):
+        def forward(self, weight, index):
+            return weight[index]
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    weight = make_static_inputs_with_shapes(world, [(8, 4)])[0]
+    index = make_static_inputs_with_shapes(
+        world, [(2, 3)], elem_type=ops.I64
+    )[0]
+
+    result = translate_model(Model(), [weight, index])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.embedding_op" in def_to_string(result)
+
+
+def test_diff_with_prepend_translates_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x, prepend):
+            return torch.diff(x, dim=-1, prepend=prepend)
+
+    world = make_world()
+    x, prepend = make_static_inputs_with_shapes(world, [(2, 4), (2, 2)])
+
+    result = translate_model(Model(), [x, prepend])
+
+    assert tensor_shape_values(result) == [2, 5]
+    assert "%torch.diff_op" in def_to_string(result)
+
+
+def test_bool_cumsum_translates_to_i64_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-1)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 4)], elem_type=ops.Bool)[0]
+
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.cumsum_bool_i64_op" in def_to_string(result)
+
+
+def test_new_ones_inherits_or_overrides_dtype():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.new_ones((2, 3), dtype=torch.bool)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(4,)])[0]
+
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3]
+    assert "%torch.full_op" in def_to_string(result)
+
+
+def test_two_tensor_advanced_index_translates_to_checked_index_2d():
+    class Model(torch.nn.Module):
+        def forward(self, x, rows, columns):
+            return x[rows, columns]
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(3, 4)])[0]
+    rows, columns = make_static_inputs_with_shapes(
+        world, [(2, 5), (2, 5)], elem_type=ops.I64
+    )
+
+    result = translate_model(Model(), [x, rows, columns])
+
+    assert tensor_shape_values(result) == [2, 5]
+    assert "%torch.index_2d_op" in def_to_string(result)
+
+
+def test_scalar_torch_tensor_constant_is_canonicalized():
+    world = make_world()
+    translator = FXGraphTranslator(world)
+
+    # symbolic_trace lifts this expression to get_attr, while Dynamo retains
+    # torch.tensor as a call_function; verify that spelling is registered here.
+    assert torch.tensor in translator.convert_map
+
+
 def test_scatter_src_translates_to_tensor_scatter():
     class Model(torch.nn.Module):
         def forward(self, x, index, src):

@@ -309,6 +309,31 @@ def _pack_outputs(gm: fx.GraphModule, out_shapes: list[tuple[int, ...]]) -> None
     gm.recompile()
 
 
+def _output_tensors_from_metadata(container) -> list[torch.Tensor]:
+    """Return Dynamo's FakeTensor output examples without executing the graph.
+
+    Executing ``gm`` to discover result shapes would run user computation before
+    the compiled function. Besides duplicating work and effects, that would let
+    eager PyTorch intercept invalid values which MimIR runtime checks must own.
+    Dynamo records the required shape and dtype on every output-producing node.
+    """
+    if not isinstance(container, (tuple, list)) or not all(
+        isinstance(node, fx.Node) for node in container
+    ):
+        raise NotImplementedError(f"unsupported output structure: {container!r}")
+
+    outputs = []
+    for i, node in enumerate(container):
+        value = node.meta.get("example_value", node.meta.get("val"))
+        if not isinstance(value, torch.Tensor):
+            raise NotImplementedError(
+                "mimir backend requires tensor metadata for every output; "
+                f"output {i} ({node.name}) has {type(value).__name__}"
+            )
+        outputs.append(value)
+    return outputs
+
+
 def mimir_backend(
     gm: fx.GraphModule,
     example_inputs: list[torch.Tensor],
@@ -349,15 +374,12 @@ def mimir_backend(
 
     output_node = next(n for n in gm.graph.nodes if n.op == "output")
     container = output_node.args[0]
-    if not isinstance(container, (tuple, list)) or not all(isinstance(n, fx.Node) for n in container):
-        raise NotImplementedError(f"unsupported output structure: {container!r}")
+    example_outs = _output_tensors_from_metadata(container)
     restore = type(container)
 
     # Shapes are static: one specialization per Dynamo guard set.
     input_shapes = [tuple(t.shape) for t in example_inputs]
     input_dtypes = [t.dtype for t in example_inputs]
-    with torch.no_grad():
-        example_outs = gm(*example_inputs)
     _check_tensors(example_outs, "output")
     out_shapes = [tuple(t.shape) for t in example_outs]
     out_numels = [math.prod(shape) for shape in out_shapes]
