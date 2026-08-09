@@ -908,27 +908,55 @@ class OperatorLibrary:
         return self._remember_shape(result, dims)
 
     def native_layer_norm(self, input, normalized_shape, weight=None, bias=None, eps=1e-5):
-        """Lower the common LayerNorm case through ordinary reduction operators."""
+        """Map functional/ATen LayerNorm to `%torch.native_layer_norm_op`."""
         input_dims = self.shape_of(input)
         normalized_shape = tuple(int(d) for d in normalized_shape)
         rn = len(normalized_shape)
         if rn == 0 or rn > len(input_dims):
             raise ValueError("normalized_shape must be a non-empty suffix of input shape")
-        if rn != 1:
-            raise NotImplementedError("LayerNorm currently requires a one-dimensional normalized_shape")
-        dim = len(input_dims) - 1
-        count = normalized_shape[0]
-        mean = self.div(self.sum(input, dim=dim, keepdim=True), count)
-        mean_square = self.div(self.sum(self.mul(input, input), dim=dim, keepdim=True), count)
-        variance = self.sub(mean_square, self.mul(mean, mean))
-        centered = self.sub(input, mean)
-        rstd = self.rsqrt(self.add(variance, eps))
-        result = self.mul(centered, rstd)
-        if weight is not None:
-            result = self.mul(result, self._tensor_reshape(weight, [1, normalized_shape[0]]))
-        if bias is not None:
-            result = self.add(result, self._tensor_reshape(bias, [1, normalized_shape[0]]))
-        return self._remember_shape(result, input_dims)
+        rb = len(input_dims) - rn
+        normalized_dims = input_dims[rb:]
+        if any(
+            not self.rules._same_dim(actual, self._lit_nat(expected))
+            for actual, expected in zip(normalized_dims, normalized_shape)
+        ):
+            raise ValueError("normalized_shape must match the input suffix")
+
+        elem_t = self._tensor_element_type(input)
+        normalized_type = self.world.arr(
+            self.world.tuple(normalized_dims), elem_t
+        )
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), normalized_type
+                )
+            value_dims = self.shape_of(value)
+            if not self.rules.same_shape(value_dims, normalized_dims):
+                raise ValueError("LayerNorm weight and bias must match normalized_shape")
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        callee = self.world.annex(torch_dialect.native_layer_norm_op.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(rb), self._lit_nat(rn)]
+        )
+        callee = self._apply_grouped(
+            callee,
+            [self.world.tuple(input_dims[:rb]), self.world.tuple(normalized_dims)],
+        )
+        callee = self.world.app(callee, input)
+        callee = self._apply_grouped(callee, [optional(weight), optional(bias)])
+        result = self.world.app(callee, self._f32_float_lit(eps))
+
+        stat_dims = input_dims[:rb] + [self._lit_nat(1)] * rn
+        self._remember_shape(result.proj(3, 0), input_dims)
+        self._remember_shape(result.proj(3, 1), stat_dims)
+        self._remember_shape(result.proj(3, 2), stat_dims)
+        return result
 
 
     def _torch_reduce(self, kind, input, dim, keepdim):

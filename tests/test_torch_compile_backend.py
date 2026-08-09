@@ -224,6 +224,28 @@ def test_layer_norm_matches_eager():
     check_against_eager(torch.nn.LayerNorm(8).eval(), torch.randn(4, 8))
 
 
+def test_native_layer_norm_three_results_match_eager():
+    class NativeLayerNorm(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.native_layer_norm(x, (8,), weight, bias, 1e-5)
+
+    check_against_eager(
+        NativeLayerNorm(), torch.randn(4, 8), torch.randn(8), torch.randn(8)
+    )
+
+
+def test_pytorch_fallback_decomposition_matches_eager():
+    class HardSwishLayerNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = torch.nn.LayerNorm(8)
+
+        def forward(self, x):
+            return self.norm(torch.nn.functional.hardswish(x))
+
+    check_against_eager(HardSwishLayerNorm().eval(), torch.randn(4, 8))
+
+
 def test_rms_norm_singleton_broadcast_matches_eager():
     class RMSNorm(torch.nn.Module):
         def __init__(self):

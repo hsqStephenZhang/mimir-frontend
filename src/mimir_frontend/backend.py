@@ -35,6 +35,12 @@ Profiling: pass ``options={"profile": "summary" | "tree" | "trace"}`` (or set
 `<name>_profile.json` for chrome://tracing, Perfetto, or speedscope.
 Profiling (like `debug_dir`) forces a fresh compile instead of a cache hit.
 
+Decomposition: ``options={"decomposition_policy": "mimir" | "none"}``
+selects whether the frontend applies its small, tested PyTorch decomposition
+table before importing ATen operators. A ``DecompositionPolicy`` object can be
+passed for an explicit custom fallback/preserve set. The default is ``mimir``;
+it never enables PyTorch's global decomposition table.
+
 Large graphs can raise the generic MimIR fixed-point guard with
 ``options={"max_fp_iters": N}`` (or ``MIMIR_MAX_FP_ITERS``). The compiler
 default remains unchanged when neither is supplied.
@@ -78,6 +84,7 @@ import mim
 import torch
 from torch import fx
 
+from .decomposition import apply_decomposition_policy, resolve_decomposition_policy
 from .utils import build_model_function
 
 # Dynamo intentionally keeps recurrent modules opaque unless this is enabled.
@@ -313,6 +320,9 @@ def mimir_backend(
     debug_dir = opts.pop("debug_dir", None) or os.environ.get("MIMIR_DEBUG_DIR")
     profile = opts.pop("profile", None) or os.environ.get("MIMIR_PROFILE")
     max_fp_iters = opts.pop("max_fp_iters", None) or os.environ.get("MIMIR_MAX_FP_ITERS")
+    decomposition_policy = resolve_decomposition_policy(
+        opts.pop("decomposition_policy", None)
+    )
     cache_enabled = opts.pop("cache", True)
     cache_dir = Path(opts.pop("cache_dir", None) or os.environ.get("MIMIR_CACHE_DIR") or _default_cache_dir())
     if opts:
@@ -331,6 +341,11 @@ def mimir_backend(
         # Dynamo lifts parameters, buffers, and tensor constants into
         # placeholders; get_attr would need extra trailing-argument marshaling.
         raise NotImplementedError("mimir backend does not support get_attr nodes")
+
+    # Ask PyTorch to expand only the explicitly selected fallback operators.
+    # Supported semantic operators, including native_layer_norm, remain intact
+    # and map directly to MimIR Torch axioms.
+    gm = apply_decomposition_policy(gm, example_inputs, decomposition_policy)
 
     output_node = next(n for n in gm.graph.nodes if n.op == "output")
     container = output_node.args[0]

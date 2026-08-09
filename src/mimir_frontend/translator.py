@@ -182,8 +182,9 @@ class FXGraphTranslator:
         m[torch.nn.functional.softmax] = self._wrap_softmax_int()
         m["aten._softmax.default"] = self._wrap_softmax()
         m["aten.softmax.int"] = self._wrap_softmax_int()
-        m[torch.nn.functional.layer_norm] = self._wrap_layer_norm()
-        m["aten.native_layer_norm.default"] = self._wrap_layer_norm()
+        m[torch.nn.functional.layer_norm] = self._wrap_layer_norm(native=False)
+        m[torch.native_layer_norm] = self._wrap_layer_norm(native=True)
+        m["aten.native_layer_norm.default"] = self._wrap_layer_norm(native=True)
 
         # Normalization
         m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
@@ -550,7 +551,7 @@ class FXGraphTranslator:
             return self.ops.softmax(input_def, dim=dim)
         return convert
 
-    def _wrap_layer_norm(self):
+    def _wrap_layer_norm(self, *, native):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             input_def = args[0]
@@ -558,7 +559,10 @@ class FXGraphTranslator:
             weight = args[2] if len(args) > 2 else node.kwargs.get("weight")
             bias = args[3] if len(args) > 3 else node.kwargs.get("bias")
             eps = args[4] if len(args) > 4 else node.kwargs.get("eps", 1e-5)
-            return self.ops.native_layer_norm(input_def, normalized_shape, weight, bias, eps)
+            result = self.ops.native_layer_norm(
+                input_def, normalized_shape, weight, bias, eps
+            )
+            return result if native else result.proj(3, 0)
         return convert
 
     def _wrap_functional_batch_norm(self):
