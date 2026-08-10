@@ -61,6 +61,27 @@ graph, input shapes, and a fingerprint of the MimIR installation (rebuilding
 MimIR invalidates the cache). Override the location with `MIMIR_CACHE_DIR` or
 `options={"cache_dir": ...}`; disable with `options={"cache": False}`.
 
+## Benchmarking
+
+`scripts/benchmark_backends.py` times the same model files (either
+`export_to_mim = export(...)` or the KernelBench `Model` + `get_inputs()` +
+`get_init_inputs()` layout) across eager, inductor, and the mimir backend on
+identical inputs, and reports per-backend first-call (compile) time,
+steady-state mean/min, speedup vs eager, and max abs error vs eager:
+
+```bash
+# all backends, single-threaded PyTorch for a fair comparison with the
+# (single-threaded) mimir runtime
+uv run --no-sync python scripts/benchmark_backends.py models/py/mlp.py --threads 1
+
+# a whole directory, mimir vs eager only, forcing a fresh mimir compile
+uv run --no-sync python scripts/benchmark_backends.py models/py --backends mimir,eager --no-cache
+```
+
+`--threads N` pins PyTorch's intra/inter-op thread pools (the OMP/MKL
+environment variables are set before torch is imported); without it, eager and
+inductor use all cores. `--repeat` controls the number of timed runs.
+
 ## Running Tests
 
 Use `uv run --no-sync pytest -q` after bootstrap:

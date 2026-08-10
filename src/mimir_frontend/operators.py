@@ -15,7 +15,7 @@ class OperatorLibrary:
         self.f32_config = world.annex(math.f32.value)
         self.F32 = world.annex(math.F32.value)
         self.Bool = world.type_bool()
-        self.mode0 = world.lit_nat_0()
+        self.mode80 = world.lit_nat(80)
         self.sym_map = {} # Mapping from symbolic name to MimIR Nat variable
         self._shape_cache: dict[mim.Def, list[mim.Def]] = {}
 
@@ -24,7 +24,7 @@ class OperatorLibrary:
             axm = world.annex(axm_enum.value)
             # %_math_arith.add {pe} mode
             axm = world.app(axm, self.f32_config)
-            return world.app(axm, self.mode0)
+            return world.app(axm, self.mode80)
 
         # Arithmetic
         self.f32_add_axm = bind_math_axm(_math_arith.add)
