@@ -1393,8 +1393,10 @@ class OperatorLibrary:
             
         return lam
 
-    def var_mean(self, input, dim=None, keepdim=False, correction=0):
+    def var_mean(self, input, dim=None, keepdim=False, correction=1):
         """Emit the Torch var_mean decomposition and restore optional keepdim."""
+        if correction is None:
+            correction = 1
         dims = self.shape_of(input)
         logical_rank = len(dims)
         dim_list = (
@@ -1448,7 +1450,9 @@ class OperatorLibrary:
             callee,
             self.world.tuple([
                 self.world.tuple(dim_values),
-                self._lit_nat(correction),
+                self._float_lit(
+                    self._tensor_element_type(input), correction
+                ),
             ]),
         )
         result = self.world.app(callee, input)

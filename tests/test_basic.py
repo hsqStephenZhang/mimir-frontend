@@ -1521,6 +1521,21 @@ def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
         assert "%torch.reshape_op" in ir
 
 
+@pytest.mark.parametrize("correction", [-1, 4, 5, 0.5])
+def test_var_mean_accepts_scalar_correction(correction):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.var_mean(
+                x, dim=-1, keepdim=True, correction=correction
+            )
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+
+    assert isinstance(result, mim.Def)
+    assert "%torch.var_mean_dims_op" in def_to_string(result)
+
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("dim,keepdim", [(None, False), (0, True)])
 def test_var_mean_rank_zero_result_is_explicitly_unsupported(
