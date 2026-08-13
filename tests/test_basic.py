@@ -811,6 +811,32 @@ def test_qwen_exact_triu_overload_is_registered():
     assert "%torch.triu_op" in def_to_string(result)
 
 
+def test_tensor_T_maps_to_matrix_transpose():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.T
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(3, 5)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [5, 3]
+    assert "%torch.permute_op" in def_to_string(result)
+
+
+def test_exact_tril_overload_maps_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.tril.default(x, -1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(5, 5)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [5, 5]
+    assert "%torch.tril_op" in def_to_string(result)
+
+
 def test_convolution_2d_with_bias_translates_to_conv_and_add():
     class Model(torch.nn.Module):
         def forward(self, x, weight, bias):

@@ -1224,7 +1224,8 @@ class OperatorLibrary:
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
 
-    def triu(self, input, diagonal=0):
+    def _triangular(self, input, diagonal, op, name):
+        """Instantiate a Torch triangular axiom with a dtype-correct zero."""
         dims = self.shape_of(input)
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(input)
@@ -1235,11 +1236,13 @@ class OperatorLibrary:
         elif elem_type == self.Bool:
             zero = self.world.lit_ff()
         else:
-            raise NotImplementedError(f"triu with element type {elem_type} is not implemented")
+            raise NotImplementedError(
+                f"{name} with element type {elem_type} is not implemented"
+            )
         if isinstance(diagonal, int):
-            diagonal = self.world.lit(self.I64, diagonal)
+            diagonal = self.world.lit_i64(diagonal)
 
-        callee = self.world.annex(torch_dialect.triu_op.value)
+        callee = self.world.annex(op.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -1251,6 +1254,16 @@ class OperatorLibrary:
         callee = self.world.app(callee, self.world.tuple([zero, diagonal]))
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
+
+    def triu(self, input, diagonal=0):
+        return self._triangular(
+            input, diagonal, torch_dialect.triu_op, "triu"
+        )
+
+    def tril(self, input, diagonal=0):
+        return self._triangular(
+            input, diagonal, torch_dialect.tril_op, "tril"
+        )
 
     def native_layer_norm(self, input, normalized_shape, weight=None, bias=None, eps=1e-5):
         """Map functional/ATen LayerNorm to `%torch.native_layer_norm_op`."""

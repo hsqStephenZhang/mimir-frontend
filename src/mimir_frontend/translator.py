@@ -343,6 +343,8 @@ class FXGraphTranslator:
         m["aten.where.self"] = self._wrap_where()
         m[torch.triu] = self._wrap_triu()
         m["aten.triu.default"] = self._wrap_triu()
+        m[torch.tril] = self._wrap_tril()
+        m["aten.tril.default"] = self._wrap_tril()
 
         # Tuple operations
         m[operator.getitem] = self._wrap_getitem()
@@ -998,6 +1000,9 @@ class FXGraphTranslator:
             attr_name = args[1] if len(args) > 1 else node.kwargs.get("name")
             if attr_name == "shape":
                 return self.ops.shape_of(obj)
+            if attr_name == "T":
+                rank = len(self.ops.shape_of(obj))
+                return self.ops.transpose(obj, list(reversed(range(rank))))
             else:
                 raise NotImplementedError(f"getattr for {attr_name} is not implemented")
         return convert
@@ -1101,6 +1106,13 @@ class FXGraphTranslator:
             args = self.retrieve_args(node)
             diagonal = args[1] if len(args) > 1 else node.kwargs.get("diagonal", 0)
             return self.ops.triu(args[0], diagonal=diagonal)
+        return convert
+
+    def _wrap_tril(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            diagonal = args[1] if len(args) > 1 else node.kwargs.get("diagonal", 0)
+            return self.ops.tril(args[0], diagonal=diagonal)
         return convert
 
     def _wrap_flatten(self):

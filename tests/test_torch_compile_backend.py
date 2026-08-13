@@ -126,6 +126,25 @@ def test_linear_mlp_matches_eager():
     check_against_eager(LinearMLP(), torch.randn(4, 16))
 
 
+def test_tensor_T_matches_eager():
+    class MatrixTranspose(torch.nn.Module):
+        def forward(self, x, y):
+            # Consuming the view keeps `.T` inside Dynamo's compiled graph.
+            return x.T @ y
+
+    check_against_eager(
+        MatrixTranspose(), torch.randn(3, 5), torch.randn(3, 2)
+    )
+
+
+def test_tril_matches_eager():
+    class LowerTriangle(torch.nn.Module):
+        def forward(self, x):
+            return torch.tril(x, diagonal=-1)
+
+    check_against_eager(LowerTriangle(), torch.randn(5, 5))
+
+
 def test_gather_negative_dim_matches_eager():
     class Gather(torch.nn.Module):
         def forward(self, x, index):
