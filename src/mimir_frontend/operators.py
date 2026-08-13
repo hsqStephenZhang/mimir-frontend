@@ -1109,7 +1109,43 @@ class OperatorLibrary:
     def softmax(self, input, dim=-1):
         """Emit API-level softmax; stabilization and reduction live in MimIR."""
         dims = self.shape_of(input)
+        logical_rank = len(dims)
+        canonical_dim = dim + logical_rank if dim < 0 else dim
+        if canonical_dim < 0 or canonical_dim >= logical_rank:
+            raise IndexError(
+                f"softmax dimension {dim} is out of range for rank {logical_rank}"
+            )
+
+        physical_axes = [
+            axis
+            for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and dims:
+            physical_axes = [logical_rank - 1]
         physical_dims = self._physical_dims(dims)
+
+        # MimIR tensor types fold literal singleton axes. Softmax along such an
+        # axis is statically all ones, represented with the existing Torch
+        # full operator so the value semantics still lower inside MimIR.
+        if canonical_dim not in physical_axes:
+            elem_type = self._tensor_element_type(input)
+            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self._apply_grouped(
+                callee, [elem_type, self._lit_nat(len(physical_dims))]
+            )
+            result = self.world.app(
+                callee,
+                self.world.tuple(
+                    [
+                        self.world.tuple(physical_dims),
+                        self._float_lit(elem_type, 1.0),
+                    ]
+                ),
+            )
+            return self._remember_shape(result, dims)
+
+        physical_dim = physical_axes.index(canonical_dim)
         callee = self.world.annex(torch_dialect.softmax_op.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
@@ -1118,7 +1154,9 @@ class OperatorLibrary:
         )
         callee = self.world.app(
             callee,
-            self.world.tuple([self.world.lit_i64(dim), self.world.lit_ff()]),
+            self.world.tuple(
+                [self.world.lit_i64(physical_dim), self.world.lit_ff()]
+            ),
         )
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)

@@ -721,6 +721,25 @@ def test_qwen_exact_softmax_int_overload_is_registered(dtype):
     assert "%torch.softmax_op" in ir
 
 
+@pytest.mark.parametrize("dim", [1, 2, -1])
+def test_softmax_maps_logical_axes_across_folded_singletons(dim):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.softmax(x, dim=dim)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 1, 4)])[0]
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    logical_shape = [world.lit_nat(2), world.lit_nat(1), world.lit_nat(4)]
+    translator.ops._remember_shape(x, logical_shape)
+    result = translator.translate(traced.graph, [x])
+
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 1, 4]
+    expected_op = "%torch.full_op" if dim == 1 else "%torch.softmax_op"
+    assert expected_op in def_to_string(result)
+
+
 def test_qwen_exact_triu_overload_is_registered():
     class Model(torch.nn.Module):
         def forward(self, x):

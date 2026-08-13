@@ -72,6 +72,15 @@ class TinyAttentionFFN(torch.nn.Module):
         return x + self.ff2(torch.relu(self.ff1(x)))
 
 
+@pytest.mark.parametrize("dim", [1, 2, -1])
+def test_softmax_folded_singleton_axes_match_eager(dim):
+    class SoftmaxFoldedSingleton(torch.nn.Module):
+        def forward(self, x):
+            return torch.softmax(x, dim=dim)
+
+    check_against_eager(SoftmaxFoldedSingleton(), torch.randn(2, 1, 4))
+
+
 class TinyTransformerBlock(torch.nn.Module):
     """A complete single-head transformer block with precomputed static width."""
 
