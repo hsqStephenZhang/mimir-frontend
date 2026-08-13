@@ -1555,6 +1555,24 @@ def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
     assert "%torch.slice_op" not in ir
 
 
+@pytest.mark.parametrize("unbiased", [False, True])
+def test_var_mean_dim_overload_maps_unbiased_to_correction(unbiased):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            variance, mean = torch.ops.aten.var_mean.dim(
+                x, [-1], unbiased, True
+            )
+            return variance + mean
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+
+    assert isinstance(result, mim.Def)
+    ir = def_to_string(result)
+    assert "%torch.var_mean_dims_op" in ir
+    assert "%torch.reshape_op" in ir
+
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("dim,keepdim", [(None, False), (0, True)])
 def test_var_mean_rank_zero_result_is_explicitly_unsupported(

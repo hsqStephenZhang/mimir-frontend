@@ -155,6 +155,18 @@ def test_var_mean_scalar_corrections_match_eager():
     )
 
 
+@pytest.mark.parametrize("unbiased", [False, True])
+def test_var_mean_dim_overload_matches_eager(unbiased):
+    class VarMeanDim(torch.nn.Module):
+        def forward(self, x):
+            variance, mean = torch.ops.aten.var_mean.dim(
+                x, [-1], unbiased, True
+            )
+            return variance, mean
+
+    check_against_eager(VarMeanDim(), torch.randn(2, 3), equal_nan=True)
+
+
 @pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
 def test_addmm_matches_eager(self_shape):
     check_against_eager(

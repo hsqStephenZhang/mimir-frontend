@@ -219,9 +219,15 @@ class FXGraphTranslator:
         m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
-        m[torch.var_mean] = self._wrap_var_mean()
-        m["aten.var_mean.default"] = self._wrap_var_mean()
-        m["aten.var_mean.correction"] = self._wrap_var_mean()
+        # https://pytorch.org/docs/stable/generated/torch.var_mean.html
+        # Public/correction schema: (Tensor, dim?, *, correction?, keepdim)
+        m[torch.var_mean] = self._wrap_var_mean_correction()
+        m["aten.var_mean.correction"] = self._wrap_var_mean_correction()
+        # Native legacy schemas use `unbiased` instead of `correction`.
+        # aten.var_mean: (Tensor, unbiased) -> (Tensor, Tensor)
+        # aten.var_mean.dim: (Tensor, dim?, unbiased, keepdim) -> pair
+        m["aten.var_mean.default"] = self._wrap_var_mean_unbiased(has_dim=False)
+        m["aten.var_mean.dim"] = self._wrap_var_mean_unbiased(has_dim=True)
         m[torch.softmax] = self._wrap_softmax()
         m[torch.nn.functional.softmax] = self._wrap_softmax_int()
         m["aten._softmax.default"] = self._wrap_softmax()
@@ -605,14 +611,36 @@ class FXGraphTranslator:
             return self.ops.amax(args[0], dim=None, keepdim=False)
         return convert
 
-    def _wrap_var_mean(self):
+    def _wrap_var_mean_correction(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            input_def = args[0]
-            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", None)
-            keepdim = args[2] if len(args) > 2 else node.kwargs.get("keepdim", False)
-            correction = args[3] if len(args) > 3 else node.kwargs.get("correction", 1)
-            return self.ops.var_mean(input_def, dim=dim, keepdim=keepdim, correction=correction)
+            kwargs = self._retrieve_args(node.kwargs)
+            dim = args[1] if len(args) > 1 else kwargs.get("dim", None)
+            return self.ops.var_mean(
+                args[0],
+                dim=dim,
+                keepdim=kwargs.get("keepdim", False),
+                correction=kwargs.get("correction", 1),
+            )
+        return convert
+
+    def _wrap_var_mean_unbiased(self, *, has_dim: bool):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            if has_dim:
+                dim = args[1] if len(args) > 1 else None
+                unbiased = args[2] if len(args) > 2 else True
+                keepdim = args[3] if len(args) > 3 else False
+            else:
+                dim = None
+                unbiased = args[1] if len(args) > 1 else True
+                keepdim = False
+            return self.ops.var_mean(
+                args[0],
+                dim=dim,
+                keepdim=keepdim,
+                correction=1 if unbiased else 0,
+            )
         return convert
 
     def _wrap_softmax(self):
