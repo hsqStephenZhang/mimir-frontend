@@ -798,6 +798,26 @@ def test_softmax_maps_logical_axes_across_folded_singletons(dim):
     assert expected_op in def_to_string(result)
 
 
+class _FlipDimension(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return x.flip(self.dim)
+
+
+class _NarrowDimension(torch.nn.Module):
+    def __init__(self, dim, start, length):
+        super().__init__()
+        self.dim = dim
+        self.start = start
+        self.length = length
+
+    def forward(self, x):
+        return x.narrow(self.dim, self.start, self.length)
+
+
 def test_qwen_exact_triu_overload_is_registered():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -835,6 +855,25 @@ def test_exact_tril_overload_maps_to_torch_semantics():
 
     assert tensor_shape_values(result) == [5, 5]
     assert "%torch.tril_op" in def_to_string(result)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_shape", "expected_op"),
+    [
+        (lambda: torch.nn.LogSoftmax(dim=1), [2, 4], "%torch.log_softmax_op"),
+        (lambda: _FlipDimension(1), [2, 4], "%torch.flip_op"),
+        (lambda: _NarrowDimension(1, 1, 2), [2, 2], "%torch.narrow_op"),
+    ],
+)
+def test_lighthouse_sequence_helpers_map_to_torch_semantics(
+    model, expected_shape, expected_op
+):
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(model(), [x])
+
+    assert tensor_shape_values(result) == expected_shape
+    assert expected_op in def_to_string(result)
 
 
 def test_convolution_2d_with_bias_translates_to_conv_and_add():

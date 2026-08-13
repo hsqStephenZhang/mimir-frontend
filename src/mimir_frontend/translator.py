@@ -246,6 +246,10 @@ class FXGraphTranslator:
         m[torch.nn.functional.softmax] = self._wrap_softmax_int()
         m["aten._softmax.default"] = self._wrap_softmax()
         m["aten.softmax.int"] = self._wrap_softmax_int()
+        m[torch.log_softmax] = self._wrap_log_softmax()
+        m[torch.nn.functional.log_softmax] = self._wrap_log_softmax()
+        m["aten._log_softmax.default"] = self._wrap_log_softmax()
+        m["aten.log_softmax.int"] = self._wrap_log_softmax()
         m[torch.nn.functional.layer_norm] = self._wrap_layer_norm(native=False)
         m[torch.native_layer_norm] = self._wrap_layer_norm(native=True)
         m["aten.native_layer_norm.default"] = self._wrap_layer_norm(native=True)
@@ -337,6 +341,12 @@ class FXGraphTranslator:
         m["aten.embedding.default"] = self._wrap_embedding()
         m["aten.alias.default"] = self._wrap_alias()
         m["aten._assert_tensor_metadata.default"] = self._wrap_assert_tensor_metadata()
+        m[torch.flip] = self._wrap_flip()
+        m["flip"] = self._wrap_flip()
+        m["aten.flip.default"] = self._wrap_flip()
+        m[torch.narrow] = self._wrap_narrow()
+        m["narrow"] = self._wrap_narrow()
+        m["aten.narrow.default"] = self._wrap_narrow()
 
         # Selection
         m[torch.where] = self._wrap_where()
@@ -780,6 +790,36 @@ class FXGraphTranslator:
                     f"aten.softmax.int with dtype {dtype} is not implemented"
                 )
             return self.ops.softmax(input_def, dim=dim)
+        return convert
+
+    def _wrap_log_softmax(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", -1)
+            dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
+            if dtype not in (None, torch.float32, torch.float):
+                raise NotImplementedError(
+                    f"log_softmax with dtype {dtype} is not implemented"
+                )
+            return self.ops.log_softmax(args[0], dim=dim)
+        return convert
+
+    def _wrap_flip(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            dims = args[1] if len(args) > 1 else node.kwargs["dims"]
+            return self.ops.flip(args[0], dims)
+        return convert
+
+    def _wrap_narrow(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.narrow(
+                args[0],
+                args[1] if len(args) > 1 else node.kwargs["dim"],
+                args[2] if len(args) > 2 else node.kwargs["start"],
+                args[3] if len(args) > 3 else node.kwargs["length"],
+            )
         return convert
 
     def _wrap_layer_norm(self, *, native):

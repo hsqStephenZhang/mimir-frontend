@@ -1166,8 +1166,8 @@ class OperatorLibrary:
             outputs = [self.reshape(output, keep_dims) for output in outputs]
         return tuple(outputs)
 
-    def softmax(self, input, dim=-1):
-        """Emit API-level softmax; stabilization and reduction live in MimIR."""
+    def _softmax(self, input, dim, op, singleton_value):
+        """Emit common softmax semantics while preserving logical singleton axes."""
         dims = self.shape_of(input)
         logical_rank = len(dims)
         canonical_dim = dim + logical_rank if dim < 0 else dim
@@ -1182,9 +1182,8 @@ class OperatorLibrary:
             physical_axes = [logical_rank - 1]
         physical_dims = self._physical_dims(dims)
 
-        # MimIR tensor types fold literal singleton axes. Softmax along such an
-        # axis is statically all ones, represented with the existing Torch
-        # full operator so the value semantics still lower inside MimIR.
+        # Reduction over a folded singleton is known statically: softmax is
+        # one and log_softmax is zero, so PE can eliminate the full operator.
         if valid_logical_dim and canonical_dim not in physical_axes:
             elem_type = self._tensor_element_type(input)
             callee = self.world.annex(torch_dialect.full_op.value)
@@ -1196,7 +1195,7 @@ class OperatorLibrary:
                 self.world.tuple(
                     [
                         self.world.tuple(physical_dims),
-                        self._float_lit(elem_type, 1.0),
+                        self._float_lit(elem_type, singleton_value),
                     ]
                 ),
             )
@@ -1209,7 +1208,7 @@ class OperatorLibrary:
             if valid_logical_dim
             else len(physical_dims)
         )
-        callee = self.world.annex(torch_dialect.softmax_op.value)
+        callee = self.world.annex(op.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -1223,6 +1222,100 @@ class OperatorLibrary:
         )
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
+
+    def softmax(self, input, dim=-1):
+        """Emit API-level softmax; stabilization and reduction live in MimIR."""
+        return self._softmax(input, dim, torch_dialect.softmax_op, 1.0)
+
+    def log_softmax(self, input, dim=-1):
+        """Emit API-level log_softmax; stabilization and reduction live in MimIR."""
+        return self._softmax(input, dim, torch_dialect.log_softmax_op, 0.0)
+
+    def flip(self, input, dims):
+        """Map logical Torch axes to the singleton-folded physical tensor rank."""
+        logical_shape = self.shape_of(input)
+        logical_rank = len(logical_shape)
+        dims = [dims] if isinstance(dims, int) else list(dims)
+        canonical = [dim + logical_rank if dim < 0 else dim for dim in dims]
+        valid = (
+            all(0 <= dim < logical_rank for dim in canonical)
+            and len(set(canonical)) == len(canonical)
+        )
+        physical_axes = [
+            axis for axis, extent in enumerate(logical_shape)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        physical_shape = self._physical_dims(logical_shape)
+        if valid:
+            physical_dims = [
+                physical_axes.index(dim)
+                for dim in canonical
+                if dim in physical_axes
+            ]
+            if not physical_dims:
+                return input
+        else:
+            # Keep malformed axes malformed so `%runtime.require` owns the
+            # diagnostic instead of silently accepting them in the frontend.
+            physical_dims = [len(physical_shape)] * max(1, len(dims))
+
+        elem_type = self._tensor_element_type(input)
+        callee = self.world.annex(torch_dialect.flip_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [
+                elem_type,
+                self._lit_nat(len(physical_shape)),
+                self._lit_nat(len(physical_dims)),
+                self.world.tuple(physical_shape),
+            ],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([self.world.lit_i64(dim) for dim in physical_dims]),
+        )
+        result = self.world.app(callee, input)
+        return self._remember_shape(result, logical_shape)
+
+    def narrow(self, input, dim, start, length):
+        """Lower Torch narrow while retaining its checked signed index semantics."""
+        logical_shape = self.shape_of(input)
+        logical_rank = len(logical_shape)
+        if not isinstance(dim, int):
+            raise NotImplementedError("dynamic narrow dim is not implemented")
+        canonical = dim + logical_rank if dim < 0 else dim
+        physical_axes = [
+            axis for axis, extent in enumerate(logical_shape)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        physical_shape = self._physical_dims(logical_shape)
+        if 0 <= canonical < logical_rank and canonical in physical_axes:
+            physical_dim = physical_axes.index(canonical)
+        else:
+            physical_dim = len(physical_shape)
+
+        elem_type = self._tensor_element_type(input)
+        callee = self.world.annex(torch_dialect.narrow_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [
+                elem_type,
+                self._lit_nat(len(physical_shape)),
+                self.world.tuple(physical_shape),
+            ],
+        )
+        start = self.world.lit_i64(start) if isinstance(start, int) else start
+        callee = self.world.app(
+            callee,
+            self.world.tuple(
+                [self.world.lit_i64(physical_dim), start, self._to_nat(length)]
+            ),
+        )
+        result = self.world.app(callee, input)
+        output_shape = list(logical_shape)
+        if 0 <= canonical < logical_rank:
+            output_shape[canonical] = self._to_nat(length)
+        return self._remember_shape(result, output_shape)
 
     def _triangular(self, input, diagonal, op, name):
         """Instantiate a Torch triangular axiom with a dtype-correct zero."""

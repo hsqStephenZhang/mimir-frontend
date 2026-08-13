@@ -145,6 +145,14 @@ def test_tril_matches_eager():
     check_against_eager(LowerTriangle(), torch.randn(5, 5))
 
 
+def test_log_softmax_flip_and_narrow_match_eager():
+    class SequenceHelpers(torch.nn.Module):
+        def forward(self, x):
+            return torch.log_softmax(x.flip(1).narrow(1, 1, 3), dim=1)
+
+    check_against_eager(SequenceHelpers(), torch.randn(2, 6))
+
+
 def test_gather_negative_dim_matches_eager():
     class Gather(torch.nn.Module):
         def forward(self, x, index):
