@@ -162,6 +162,7 @@ class FXGraphTranslator:
 
         m["aten.slice.Tensor"] = self._wrap_slice()
         m["aten.select.int"] = self._wrap_select()
+        m["select"] = self._wrap_select()
         m["aten.split.Tensor"] = self._wrap_split()
         m["split"] = self._wrap_split()
         
@@ -201,6 +202,8 @@ class FXGraphTranslator:
         m[torch.full] = self._wrap_full()
         m[torch.tensor] = self._wrap_tensor_constant()
         m["aten.full.default"] = self._wrap_full()
+        m[torch.zeros_like] = self._wrap_zeros_like()
+        m["aten.zeros_like.default"] = self._wrap_zeros_like()
         m[torch.zeros] = self._wrap_zeros()
         m["aten.zeros.default"] = self._wrap_zeros()
         m[torch.ones] = self._wrap_ones()
@@ -1259,6 +1262,25 @@ class FXGraphTranslator:
             fill_value = args[1] if len(args) > 1 else node.kwargs.get("fill_value")
             dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
             return self.ops.full(shape, fill_value, dtype=dtype)
+        return convert
+
+    def _wrap_zeros_like(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            reference = args[0]
+            elem_type = self.ops._tensor_element_type(reference)
+            inferred_dtype = {
+                self.ops.F32: torch.float32,
+                self.ops.I64: torch.int64,
+                self.ops.Bool: torch.bool,
+            }.get(elem_type)
+            dtype = kwargs.get("dtype") or inferred_dtype
+            if dtype != inferred_dtype:
+                raise NotImplementedError("zeros_like dtype conversion is not implemented")
+            if kwargs.get("requires_grad", False):
+                raise NotImplementedError("zeros_like requires_grad=True is not implemented")
+            return self.ops.full(self.ops.shape_of(reference), 0, dtype=dtype)
         return convert
 
     def _wrap_tensor_constant(self):
