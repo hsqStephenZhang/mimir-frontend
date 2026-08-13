@@ -1111,10 +1111,7 @@ class OperatorLibrary:
         dims = self.shape_of(input)
         logical_rank = len(dims)
         canonical_dim = dim + logical_rank if dim < 0 else dim
-        if canonical_dim < 0 or canonical_dim >= logical_rank:
-            raise IndexError(
-                f"softmax dimension {dim} is out of range for rank {logical_rank}"
-            )
+        valid_logical_dim = 0 <= canonical_dim < logical_rank
 
         physical_axes = [
             axis
@@ -1128,7 +1125,7 @@ class OperatorLibrary:
         # MimIR tensor types fold literal singleton axes. Softmax along such an
         # axis is statically all ones, represented with the existing Torch
         # full operator so the value semantics still lower inside MimIR.
-        if canonical_dim not in physical_axes:
+        if valid_logical_dim and canonical_dim not in physical_axes:
             elem_type = self._tensor_element_type(input)
             callee = self.world.annex(torch_dialect.full_op.value)
             callee = self._apply_grouped(
@@ -1145,7 +1142,13 @@ class OperatorLibrary:
             )
             return self._remember_shape(result, dims)
 
-        physical_dim = physical_axes.index(canonical_dim)
+        # Preserve invalid dimensions as invalid MimIR inputs. The Torch
+        # plugin's precondition then owns static diagnostics/runtime checks.
+        physical_dim = (
+            physical_axes.index(canonical_dim)
+            if valid_logical_dim
+            else len(physical_dims)
+        )
         callee = self.world.annex(torch_dialect.softmax_op.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(

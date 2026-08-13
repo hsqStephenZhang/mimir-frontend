@@ -721,7 +721,7 @@ def test_qwen_exact_softmax_int_overload_is_registered(dtype):
     assert "%torch.softmax_op" in ir
 
 
-@pytest.mark.parametrize("dim", [1, 2, -1])
+@pytest.mark.parametrize("dim", [1, 2, -1, 3])
 def test_softmax_maps_logical_axes_across_folded_singletons(dim):
     class Model(torch.nn.Module):
         def forward(self, x):
