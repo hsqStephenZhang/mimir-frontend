@@ -181,7 +181,10 @@ class OperatorLibrary:
         dims = []
         tensor_type = tensor_def.type()
         while isinstance(tensor_type, mim.Seq):
-            dims.append(tensor_type.arity())
+            arity = tensor_type.arity()
+            if isinstance(arity, mim.Tuple) and arity.num_projs() == 0:
+                break
+            dims.append(arity)
             tensor_type = tensor_type.body()
         return dims
 
@@ -1581,32 +1584,21 @@ class OperatorLibrary:
         return self._remember_shape(result, [m, n])
 
     def matmul(self, lhs, rhs):
-        """Translate matrix and batch-matrix cases of `aten.matmul`."""
-        lhs_dims = self.shape_of(lhs)
-        rhs_dims = self.shape_of(rhs)
-        if len(lhs_dims) < 2 or len(rhs_dims) < 2:
-            raise NotImplementedError("aten.matmul vector and scalar cases are not implemented yet")
-        if not self.rules._same_dim(lhs_dims[-1], rhs_dims[-2]):
-            raise ValueError("aten.matmul contracting dimensions must match")
-        if len(lhs_dims) == 2 and len(rhs_dims) == 2:
-            return self.mm(lhs, rhs)
-
-        batch_dims = self.rules.broadcast_shape(lhs_dims[:-2], rhs_dims[:-2])
-        lhs_target = batch_dims + lhs_dims[-2:]
-        rhs_target = batch_dims + rhs_dims[-2:]
-        if not self.rules.same_shape(lhs_dims, lhs_target):
-            lhs = self.expand(lhs, lhs_target)
-        if not self.rules.same_shape(rhs_dims, rhs_target):
-            rhs = self.expand(rhs, rhs_target)
-
-        batch_rank = self._lit_nat(len(batch_dims))
-        m, k, n = lhs_dims[-2], lhs_dims[-1], rhs_dims[-1]
+        """Map `aten.matmul`; rank dispatch and broadcasting live in MimIR."""
+        lhs_dims = self._physical_dims(self.shape_of(lhs))
+        rhs_dims = self._physical_dims(self.shape_of(rhs))
         callee = self.world.annex(torch_dialect.matmul_op.value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
-        callee = self._apply_grouped(callee, [batch_rank, m, k, n])
-        callee = self.world.app(callee, self.world.tuple(batch_dims))
-        result = self.world.app(callee, self.world.tuple([lhs, rhs]))
-        return self._remember_shape(result, batch_dims + [m, n])
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._lit_nat(len(lhs_dims)),
+                self._lit_nat(len(rhs_dims)),
+                self.world.tuple(lhs_dims),
+                self.world.tuple(rhs_dims),
+            ],
+        )
+        return self.world.app(callee, self.world.tuple([lhs, rhs]))
 
     def linear(self, input, weight, bias=None):
         input_dims = self.shape_of(input)

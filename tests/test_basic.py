@@ -91,7 +91,10 @@ def tensor_shape(tensor_def: mim.Def):
     dims = []
     tensor_type = tensor_def.type()
     while isinstance(tensor_type, mim.Seq):
-        dims.append(tensor_type.arity())
+        arity = tensor_type.arity()
+        if isinstance(arity, mim.Tuple) and arity.num_projs() == 0:
+            break
+        dims.append(arity)
         tensor_type = tensor_type.body()
     return dims
 
@@ -627,7 +630,7 @@ def test_rank4_matmul_maps_directly_to_torch_matmul():
     assert "%torch.matmul_op" in def_to_string(result)
 
 
-def test_matmul_broadcasts_batch_prefix_before_torch_matmul():
+def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):
             return lhs @ rhs
@@ -638,8 +641,50 @@ def test_matmul_broadcasts_batch_prefix_before_torch_matmul():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 3, 5, 11]
-    assert "%torch.expand_op" in ir
+    assert "%torch.expand_op" not in ir
     assert "%torch.matmul_op" in ir
+
+
+@pytest.mark.parametrize(
+    "lhs_shape,rhs_shape,output_shape",
+    [
+        ((5,), (5,), []),
+        ((5,), (5, 7), [7]),
+        ((3, 5), (5,), [3]),
+        ((2, 3, 5), (5,), [2, 3]),
+        ((5,), (2, 5, 7), [2, 7]),
+    ],
+)
+def test_matmul_maps_all_vector_rank_cases_to_torch_semantics(
+    lhs_shape, rhs_shape, output_shape
+):
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.ops.aten.matmul.default(lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(world, [lhs_shape, rhs_shape])
+    result = translate_model(Model(), [lhs, rhs])
+
+    assert tensor_shape_values(result) == output_shape
+    assert "%torch.matmul_op" in def_to_string(result)
+
+
+def test_matmul_leaves_batch_broadcast_to_torch_plugin():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return lhs @ rhs
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(
+        world, [(3, 5, 7), (2, 3, 7, 11)]
+    )
+    result = translate_model(Model(), [lhs, rhs])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 3, 5, 11]
+    assert "%torch.matmul_op" in ir
+    assert "%torch.expand_op" not in ir
 
 
 def test_empty_strided_then_fill_preserves_shape_and_torch_semantics():

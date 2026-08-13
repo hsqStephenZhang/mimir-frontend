@@ -580,6 +580,26 @@ def test_rank4_matmul_matches_eager():
     )
 
 
+@pytest.mark.parametrize(
+    "lhs_shape,rhs_shape",
+    [
+        ((5,), (5, 7)),
+        ((3, 5), (5,)),
+        ((2, 3, 5), (5,)),
+        ((5,), (2, 5, 7)),
+        ((3, 5, 7), (2, 3, 7, 11)),
+    ],
+)
+def test_matmul_rank_dispatch_matches_eager(lhs_shape, rhs_shape):
+    class MatmulRankDispatch(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return lhs @ rhs
+
+    check_against_eager(
+        MatmulRankDispatch(), torch.randn(lhs_shape), torch.randn(rhs_shape)
+    )
+
+
 def test_layer_norm_matches_eager():
     check_against_eager(torch.nn.LayerNorm(8).eval(), torch.randn(4, 8))
 
