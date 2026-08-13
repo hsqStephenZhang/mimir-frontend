@@ -2229,13 +2229,45 @@ class OperatorLibrary:
         count_include_pad=True,
         divisor_override=None,
     ):
-        if ceil_mode:
-            raise NotImplementedError("avg_pool2d ceil_mode=True is not implemented")
-        if not count_include_pad:
-            raise NotImplementedError("avg_pool2d count_include_pad=False is not implemented")
-        if divisor_override is not None:
-            raise NotImplementedError("avg_pool2d divisor_override is not implemented")
-        return self.pool2d(x, kernel_size, stride=stride, padding=padding, dilation=1, mode="avg")
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 4:
+            raise NotImplementedError("avg_pool2d currently supports 4D NCHW inputs only")
+        kernel = self._pair(kernel_size, "kernel_size")
+        if stride is None or stride == []:
+            stride = kernel
+        stride = self._pair(stride, "stride")
+        padding = self._pair(padding, "padding")
+        n, c, h, w = in_dims
+        out_spatial = [
+            self._pool2d_dim(h, kernel[0], stride[0], 1, padding[0], ceil_mode),
+            self._pool2d_dim(w, kernel[1], stride[1], 1, padding[1], ceil_mode),
+        ]
+
+        callee = self.world.annex(torch_dialect.avg_pool2d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, h, w])
+        if divisor_override is None:
+            optional_divisor = self.world.app(
+                self.world.annex(option.none.value), self.world.type_nat()
+            )
+        else:
+            divisor = self._to_nat(divisor_override)
+            optional_divisor = self.world.implicit_app(
+                self.world.annex(option.some.value), divisor
+            )
+        callee = self._apply_grouped(
+            callee,
+            [
+                self.world.tuple([self._to_nat(kernel[0]), self._to_nat(kernel[1])]),
+                self.world.tuple([self._to_nat(stride[0]), self._to_nat(stride[1])]),
+                self.world.tuple([self._to_nat(padding[0]), self._to_nat(padding[1])]),
+                self.world.lit_bool(ceil_mode),
+                self.world.lit_bool(count_include_pad),
+                optional_divisor,
+            ],
+        )
+        result = self.world.app(callee, x)
+        return self._remember_shape(result, [n, c, *out_spatial])
 
     def repeat(self, x, repeats):
         in_dims = self.shape_of(x)

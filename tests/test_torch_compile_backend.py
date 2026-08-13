@@ -155,6 +155,30 @@ def test_scatter_value_negative_dim_matches_eager():
     check_against_eager(ScatterValue(), torch.randn(2, 4), index)
 
 
+@pytest.mark.parametrize(
+    ("ceil_mode", "count_include_pad", "divisor_override"),
+    [(False, True, None), (True, True, None), (True, False, None), (True, False, 7)],
+)
+def test_avg_pool2d_parameter_semantics_match_eager(
+    ceil_mode, count_include_pad, divisor_override
+):
+    class AvgPool(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.avg_pool2d.default(
+                x,
+                [3, 3],
+                [2, 2],
+                [1, 1],
+                ceil_mode,
+                count_include_pad,
+                divisor_override,
+            )
+
+    # The last ceil-mode window extends beyond explicit padding. This
+    # distinguishes PyTorch's pool_size from the implementation-only pad.
+    check_against_eager(AvgPool(), torch.randn(1, 2, 4, 4))
+
+
 def test_sum_empty_dimensions_matches_eager_reduce_all():
     class SumEmptyDimensions(torch.nn.Module):
         def forward(self, x):

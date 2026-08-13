@@ -1311,17 +1311,19 @@ def test_single_input_cat_is_identity():
     assert result == x
 
 
-def test_avg_pool2d_translates_to_tensor_pool_and_scale():
+def test_avg_pool2d_translates_to_torch_pool_with_full_parameters():
     class Model(torch.nn.Module):
         def forward(self, x):
-            return torch.ops.aten.avg_pool2d.default(x, [2, 2], [2, 2], [0, 0], False, True, None)
+            return torch.ops.aten.avg_pool2d.default(
+                x, [3, 3], [2, 2], [1, 1], True, False, 7
+            )
 
     world = make_world()
-    x = make_static_inputs_with_shapes(world, [(2, 3, 8, 8)])[0]
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4, 4)])[0]
     result = translate_model(Model(), [x])
 
-    assert tensor_shape_values(result) == [2, 3, 4, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%tensor.pool", "%torch.mul_scalar_op"])
+    assert tensor_shape_values(result) == [2, 3, 3, 3]
+    assert "%torch.avg_pool2d_op" in def_to_string(result)
 
 
 def test_lenet_style_cnn_with_pooling_translates():
