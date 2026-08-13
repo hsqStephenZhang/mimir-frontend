@@ -1098,6 +1098,19 @@ def test_tensor_repeat_uses_counts_and_left_rank_alignment():
     assert "%torch.repeat_op" in def_to_string(result)
 
 
+def test_constant_pad_uses_pytorch_reverse_axis_order():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.pad.default(x, [1, 2, 3, 4], "constant", 0.5)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 5, 7)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 12, 10]
+    assert "%torch.constant_pad_op" in def_to_string(result)
+
+
 def test_getitem_tensor_index_translates_to_dim0_index():
     class Model(torch.nn.Module):
         def forward(self, weight, index):
@@ -1143,6 +1156,45 @@ def test_bool_cumsum_translates_to_i64_torch_semantics():
 
     assert tensor_shape_values(result) == [2, 4]
     assert "%torch.cumsum_bool_i64_op" in def_to_string(result)
+
+
+def test_cumprod_translates_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.cumprod.default(x, 1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.cumprod_op" in def_to_string(result)
+
+
+def test_roll_translates_static_shifts_and_repeated_dims():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.roll.default(x, [1, -2, 1], [1, 2, 1])
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.roll_op" in def_to_string(result)
+
+
+def test_unfold_captures_vit_patch_shape():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.unfold.default(x, 2, 4, 4)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 8, 8)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 2, 8, 4]
+    assert "%torch.unfold_op" in def_to_string(result)
 
 
 def test_new_ones_inherits_or_overrides_dtype():
@@ -1230,6 +1282,34 @@ def test_alias_returns_the_same_ssa_value():
     assert translate_model(Model(), [x]) == x
 
 
+def test_detach_default_returns_the_same_ssa_value():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.detach.default(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3)])[0]
+
+    assert translate_model(Model(), [x]) == x
+
+
+def test_ones_default_translates_to_torch_full():
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(1,)])[0]
+    graph = fx.Graph()
+    graph.placeholder("x")
+    result_node = graph.call_function(
+        torch.ops.aten.ones.default,
+        args=([2, 3],),
+        kwargs={"dtype": torch.float32, "device": torch.device("cpu")},
+    )
+    graph.output(result_node)
+    result = FXGraphTranslator(world).translate(graph, [x])
+
+    assert tensor_shape_values(result) == [2, 3]
+    assert "%torch.full_op" in def_to_string(result)
+
+
 def test_assert_tensor_metadata_emits_shape_guard():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -1286,6 +1366,19 @@ def test_max_pool2d_ceil_mode_shape():
     assert "%torch.max_pool2d_op" in def_to_string(result)
 
 
+def test_max_pool1d_reuses_torch_pool_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool1d.default(x, [3], [2], [1], [2], True)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 9)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 4]
+    assert "%torch.max_pool1d_op" in def_to_string(result)
+
+
 def test_hardtanh_translates_to_torch_op():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -1324,6 +1417,77 @@ def test_avg_pool2d_translates_to_torch_pool_with_full_parameters():
 
     assert tensor_shape_values(result) == [2, 3, 3, 3]
     assert "%torch.avg_pool2d_op" in def_to_string(result)
+
+
+def test_avg_pool1d_reuses_torch_pool_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.avg_pool1d.default(x, [3], [2], [1], True, False)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 8)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 5]
+    assert "%torch.avg_pool1d_op" in def_to_string(result)
+
+
+def test_adaptive_avg_pool1d_uses_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.adaptive_avg_pool1d.default(x, [1])
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 8)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3]
+    assert "%torch.adaptive_avg_pool1d_op" in def_to_string(result)
+
+
+def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.adaptive_avg_pool3d.default(x, [1, 1, 1])
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4, 5, 6)])[0]
+    result = translate_model(Model(), [x])
+
+    # Literal-one nested array axes normalize away in the physical MimIR type;
+    # the frontend shape cache and FX output metadata preserve logical NC111.
+    assert tensor_shape_values(result) == [2, 3]
+    assert "%torch.adaptive_avg_pool3d_op" in def_to_string(result)
+
+
+def test_max_pool3d_preserves_full_parameter_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool3d.default(
+                x, [3, 3, 3], [2, 2, 2], [1, 1, 1], [1, 1, 1], True
+            )
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 5, 7, 9)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 3, 4, 5]
+    assert "%torch.max_pool3d_op" in def_to_string(result)
+
+
+def test_avg_pool3d_preserves_boundary_divisor_parameters():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.avg_pool3d.default(
+                x, [3, 3, 3], [2, 2, 2], [1, 1, 1], True, False, None
+            )
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 5, 7, 9)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 3, 3, 4, 5]
+    assert "%torch.avg_pool3d_op" in def_to_string(result)
 
 
 def test_lenet_style_cnn_with_pooling_translates():

@@ -2063,6 +2063,13 @@ class OperatorLibrary:
             return tuple(value)
         raise NotImplementedError(f"{name} must be an int or length-2 sequence")
 
+    def _triple(self, value, name):
+        if isinstance(value, int):
+            return (value, value, value)
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            return tuple(value)
+        raise NotImplementedError(f"{name} must be an int or length-3 sequence")
+
     def _single(self, value, name):
         if isinstance(value, int):
             return value
@@ -2189,6 +2196,67 @@ class OperatorLibrary:
         result = self.world.app(callee, x)
         return self._remember_shape(result, [n, c, *out_spatial])
 
+    def max_pool1d(
+        self, x, kernel_size, stride=None, padding=0, dilation=1,
+        ceil_mode=False
+    ):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 3:
+            raise NotImplementedError("max_pool1d requires a rank-3 NCL input")
+        kernel = self._single(kernel_size, "kernel_size")
+        if stride is None or stride == []:
+            stride = kernel
+        stride = self._single(stride, "stride")
+        padding = self._single(padding, "padding")
+        dilation = self._single(dilation, "dilation")
+        n, c, length = in_dims
+        output_length = self._pool2d_dim(
+            length, kernel, stride, dilation, padding, ceil_mode
+        )
+        callee = self.world.annex(torch_dialect.max_pool1d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, length])
+        callee = self.world.app(
+            callee,
+            self.world.tuple([
+                self._to_nat(kernel), self._to_nat(stride),
+                self._to_nat(padding), self._to_nat(dilation),
+                self.world.lit_bool(ceil_mode),
+            ]),
+        )
+        return self._remember_shape(self.world.app(callee, x), [n, c, output_length])
+
+    def max_pool3d(
+        self, x, kernel_size, stride=None, padding=0, dilation=1,
+        ceil_mode=False
+    ):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 5:
+            raise NotImplementedError("max_pool3d requires a rank-5 NCDHW input")
+        kernel = self._triple(kernel_size, "kernel_size")
+        if stride is None or stride == []:
+            stride = kernel
+        stride = self._triple(stride, "stride")
+        padding = self._triple(padding, "padding")
+        dilation = self._triple(dilation, "dilation")
+        n, c, depth, height, width = in_dims
+        spatial = (depth, height, width)
+        out_spatial = [
+            self._pool2d_dim(spatial[i], kernel[i], stride[i], dilation[i],
+                             padding[i], ceil_mode)
+            for i in range(3)
+        ]
+        callee = self.world.annex(torch_dialect.max_pool3d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, depth, height, width])
+        params = [
+            self.world.tuple([self._to_nat(v) for v in values])
+            for values in (kernel, stride, padding, dilation)
+        ]
+        params.append(self.world.lit_bool(ceil_mode))
+        result = self.world.app(self._apply_grouped(callee, params), x)
+        return self._remember_shape(result, [n, c, *out_spatial])
+
     def _pool2d_dim(self, size, kernel, stride, dilation, padding, ceil_mode):
         if not all(isinstance(value, int) for value in (size, kernel, stride, dilation, padding)):
             return self._conv2d_dim(size, kernel, stride, dilation, padding)
@@ -2269,6 +2337,124 @@ class OperatorLibrary:
         result = self.world.app(callee, x)
         return self._remember_shape(result, [n, c, *out_spatial])
 
+    def avg_pool1d(
+        self, x, kernel_size, stride=None, padding=0, ceil_mode=False,
+        count_include_pad=True
+    ):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 3:
+            raise NotImplementedError("avg_pool1d requires a rank-3 NCL input")
+        kernel = self._single(kernel_size, "kernel_size")
+        if stride is None or stride == []:
+            stride = kernel
+        stride = self._single(stride, "stride")
+        padding = self._single(padding, "padding")
+        n, c, length = in_dims
+        output_length = self._pool2d_dim(
+            length, kernel, stride, 1, padding, ceil_mode
+        )
+        callee = self.world.annex(torch_dialect.avg_pool1d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, length])
+        divisor_override = self.world.app(
+            self.world.annex(option.none.value), self.world.type_nat()
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([
+                self._to_nat(kernel), self._to_nat(stride),
+                self._to_nat(padding), self.world.lit_bool(ceil_mode),
+                self.world.lit_bool(count_include_pad), divisor_override,
+            ]),
+        )
+        return self._remember_shape(self.world.app(callee, x), [n, c, output_length])
+
+    def avg_pool3d(
+        self, x, kernel_size, stride=None, padding=0, ceil_mode=False,
+        count_include_pad=True, divisor_override=None
+    ):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 5:
+            raise NotImplementedError("avg_pool3d requires a rank-5 NCDHW input")
+        kernel = self._triple(kernel_size, "kernel_size")
+        if stride is None or stride == []:
+            stride = kernel
+        stride = self._triple(stride, "stride")
+        padding = self._triple(padding, "padding")
+        n, c, depth, height, width = in_dims
+        spatial = (depth, height, width)
+        out_spatial = [
+            self._pool2d_dim(spatial[i], kernel[i], stride[i], 1,
+                             padding[i], ceil_mode)
+            for i in range(3)
+        ]
+        callee = self.world.annex(torch_dialect.avg_pool3d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, depth, height, width])
+        if divisor_override is None:
+            optional_divisor = self.world.app(
+                self.world.annex(option.none.value), self.world.type_nat()
+            )
+        else:
+            optional_divisor = self.world.implicit_app(
+                self.world.annex(option.some.value), self._to_nat(divisor_override)
+            )
+        params = [
+            self.world.tuple([self._to_nat(v) for v in values])
+            for values in (kernel, stride, padding)
+        ]
+        params.extend([
+            self.world.lit_bool(ceil_mode),
+            self.world.lit_bool(count_include_pad), optional_divisor,
+        ])
+        result = self.world.app(self._apply_grouped(callee, params), x)
+        return self._remember_shape(result, [n, c, *out_spatial])
+
+    def adaptive_avg_pool1d(self, x, output_size):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 3:
+            raise NotImplementedError(
+                "adaptive_avg_pool1d requires a rank-3 NCL input"
+            )
+        output_size = self._single(output_size, "output_size")
+        if output_size != 1:
+            raise NotImplementedError(
+                "adaptive_avg_pool1d currently supports output_size=1"
+            )
+        n, c, length = in_dims
+        callee = self.world.annex(torch_dialect.adaptive_avg_pool1d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, length])
+        result = self.world.app(callee, self._lit_nat(output_size))
+        result = self.world.app(result, x)
+        return self._remember_shape(result, [n, c, self._lit_nat(1)])
+
+    def adaptive_avg_pool3d(self, x, output_size):
+        in_dims = self.shape_of(x)
+        if len(in_dims) != 5:
+            raise NotImplementedError(
+                "adaptive_avg_pool3d requires a rank-5 NCDHW input"
+            )
+        if isinstance(output_size, int):
+            output_size = (output_size,) * 3
+        else:
+            output_size = tuple(output_size)
+        if output_size != (1, 1, 1):
+            raise NotImplementedError(
+                "adaptive_avg_pool3d currently supports output_size=(1,1,1)"
+            )
+        n, c, depth, height, width = in_dims
+        callee = self.world.annex(torch_dialect.adaptive_avg_pool3d_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(callee, [n, c, depth, height, width])
+        result = self.world.app(
+            callee, self.world.tuple([self._lit_nat(1)] * 3)
+        )
+        result = self.world.app(result, x)
+        return self._remember_shape(
+            result, [n, c, self._lit_nat(1), self._lit_nat(1), self._lit_nat(1)]
+        )
+
     def repeat(self, x, repeats):
         in_dims = self.shape_of(x)
         repeats = list(repeats)
@@ -2294,6 +2480,56 @@ class OperatorLibrary:
         callee = self._apply_grouped(callee, [elem_t, rank, in_shape_tuple])
         callee = self.world.app(callee, self.world.tuple(repeat_defs))
         result = self.world.app(callee, x)
+        return self._remember_shape(result, out_dims)
+
+    def pad(self, x, padding, *, mode="constant", value=None):
+        if mode != "constant":
+            raise NotImplementedError("pad currently supports constant mode only")
+        padding = list(padding)
+        if not padding or len(padding) % 2 != 0:
+            raise ValueError("pad expects a non-empty even-length padding list")
+        if not all(isinstance(width, int) and width >= 0 for width in padding):
+            raise NotImplementedError(
+                "pad currently requires static nonnegative widths"
+            )
+        in_dims = self.shape_of(x)
+        rank = len(in_dims)
+        padded_rank = len(padding) // 2
+        if padded_rank > rank:
+            raise ValueError("pad length must not exceed input rank")
+
+        out_dims = list(in_dims)
+        for pad_axis in range(padded_rank):
+            axis = rank - 1 - pad_axis
+            out_dims[axis] = self._nat_binop(
+                core.nat.add,
+                self._nat_binop(
+                    core.nat.add, out_dims[axis], padding[2 * pad_axis]
+                ),
+                padding[2 * pad_axis + 1],
+            )
+
+        elem_type = self._tensor_element_type(x)
+        if value is None:
+            value = 0
+        if elem_type in (self.F32, self.F64):
+            scalar = self._float_lit(elem_type, value)
+        elif elem_type == self.I64:
+            scalar = self.world.lit_i64(int(value))
+        elif elem_type == self.Bool:
+            scalar = self.world.lit_bool(bool(value))
+        else:
+            raise NotImplementedError(f"pad value for element type {elem_type}")
+
+        callee = self.world.annex(torch_dialect.constant_pad_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [elem_type, self._lit_nat(rank), self._lit_nat(padded_rank),
+             self.world.tuple(in_dims)],
+        )
+        pad_tuple = self.world.tuple([self._lit_nat(width) for width in padding])
+        result = self.world.app(callee, self.world.tuple([pad_tuple, scalar]))
+        result = self.world.app(result, x)
         return self._remember_shape(result, out_dims)
 
     def diff(self, input, *, n=1, dim=-1, prepend=None, append=None):
@@ -2384,6 +2620,108 @@ class OperatorLibrary:
             callee = self.world.app(callee, self.world.lit_i64(physical_dim))
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
+
+    def cumprod(self, input, dim, *, dtype=None):
+        if dtype is not None:
+            raise NotImplementedError("cumprod dtype conversion is not implemented")
+        dims = self.shape_of(input)
+        rank = len(dims)
+        canonical_dim = dim + rank if dim < 0 else dim
+        if canonical_dim < 0 or canonical_dim >= rank:
+            raise ValueError(f"cumprod dim {dim} is out of range for rank {rank}")
+        callee = self.world.annex(torch_dialect.cumprod_op.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(rank), self.world.tuple(dims)]
+        )
+        result = self.world.app(callee, self.world.lit_i64(dim))
+        result = self.world.app(result, input)
+        return self._remember_shape(result, dims)
+
+    def roll(self, input, shifts, dims=None):
+        # PyTorch flattens the tensor when dims is omitted. Keeping that case
+        # explicit avoids hiding a reshape policy in the Python bridge.
+        if dims is None:
+            raise NotImplementedError("roll without dims is not implemented")
+        shift_values = [shifts] if isinstance(shifts, int) else list(shifts)
+        dim_values = [dims] if isinstance(dims, int) else list(dims)
+        if len(shift_values) != len(dim_values):
+            raise ValueError("roll expects shifts and dims to have equal length")
+        if not all(isinstance(value, int) for value in shift_values + dim_values):
+            raise NotImplementedError("roll currently requires static shifts and dims")
+
+        shape = self.shape_of(input)
+        rank = len(shape)
+        normalized_shifts = []
+        for shift, dim in zip(shift_values, dim_values):
+            canonical = dim + rank if dim < 0 else dim
+            if canonical < 0 or canonical >= rank:
+                raise IndexError(f"roll dim {dim} is out of range for rank {rank}")
+            extent = shape[canonical]
+            if not isinstance(extent, mim.Lit):
+                raise NotImplementedError(
+                    "roll currently requires static extents on rolled dimensions"
+                )
+            extent_value = extent.get_nat()
+            normalized_shifts.append(0 if extent_value == 0 else shift % extent_value)
+
+        callee = self.world.annex(torch_dialect.roll_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [self._tensor_element_type(input), self._lit_nat(rank),
+             self._lit_nat(len(dim_values)), self.world.tuple(shape)],
+        )
+        params = self.world.tuple([
+            self.world.tuple([self._lit_nat(value) for value in normalized_shifts]),
+            self.world.tuple([self.world.lit_i64(value) for value in dim_values]),
+        ])
+        result = self.world.app(self.world.app(callee, params), input)
+        return self._remember_shape(result, shape)
+
+    def unfold(self, input, dimension, size, step):
+        if not all(isinstance(value, int) for value in (dimension, size, step)):
+            raise NotImplementedError(
+                "unfold currently requires static dimension, size, and step"
+            )
+        shape = self.shape_of(input)
+        rank = len(shape)
+        if rank == 0:
+            raise NotImplementedError("unfold on a scalar tensor is not implemented")
+        canonical = dimension + rank if dimension < 0 else dimension
+        if canonical < 0 or canonical >= rank:
+            raise IndexError(
+                f"unfold dimension {dimension} is out of range for rank {rank}"
+            )
+        if step <= 0:
+            raise ValueError("unfold step must be positive")
+        extent = shape[canonical]
+        if isinstance(extent, mim.Lit) and size > extent.get_nat():
+            raise ValueError("unfold size must not exceed the selected extent")
+
+        windows = self._nat_binop(
+            core.nat.add,
+            self._nat_binop(
+                core.nat.div,
+                self._nat_binop(core.nat.sub, extent, size),
+                step,
+            ),
+            1,
+        )
+        output_shape = list(shape)
+        output_shape[canonical] = windows
+        output_shape.append(self._lit_nat(size))
+
+        callee = self.world.annex(torch_dialect.unfold_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [self._tensor_element_type(input), self._lit_nat(rank),
+             self.world.tuple(shape)],
+        )
+        params = self.world.tuple([
+            self.world.lit_i64(dimension), self._lit_nat(size), self._lit_nat(step)
+        ])
+        result = self.world.app(self.world.app(callee, params), input)
+        return self._remember_shape(result, output_shape)
 
     def gather(self, input, index, dim=0):
         input_dims = self.shape_of(input)

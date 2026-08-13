@@ -179,6 +179,96 @@ def test_avg_pool2d_parameter_semantics_match_eager(
     check_against_eager(AvgPool(), torch.randn(1, 2, 4, 4))
 
 
+def test_lighthouse_max_pool1d_matches_eager():
+    class MaxPool1d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool1d.default(
+                x, [8], [1], [4], [3], False
+            )
+
+    check_against_eager(MaxPool1d(), torch.randn(2, 3, 32))
+
+
+def test_lighthouse_avg_pool1d_matches_eager():
+    class AvgPool1d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.avg_pool1d.default(
+                x, [8], [1], [4], False, True
+            )
+
+    check_against_eager(AvgPool1d(), torch.randn(2, 3, 32))
+
+
+def test_lighthouse_adaptive_avg_pool1d_matches_eager():
+    class AdaptiveAvgPool1d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.adaptive_avg_pool1d.default(x, [1])
+
+    check_against_eager(AdaptiveAvgPool1d(), torch.randn(2, 16, 9))
+
+
+def test_lighthouse_adaptive_avg_pool3d_matches_eager():
+    class AdaptiveAvgPool3d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.adaptive_avg_pool3d.default(x, [1, 1, 1])
+
+    check_against_eager(AdaptiveAvgPool3d(), torch.randn(2, 3, 4, 5, 6))
+
+
+def test_lighthouse_max_pool3d_matches_eager():
+    class MaxPool3d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool3d.default(
+                x, [3, 3, 3], [2, 2, 2], [1, 1, 1], [1, 1, 1], True
+            )
+
+    check_against_eager(MaxPool3d(), torch.randn(2, 3, 5, 7, 9))
+
+
+def test_lighthouse_avg_pool3d_matches_eager():
+    class AvgPool3d(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.avg_pool3d.default(
+                x, [3, 3, 3], [2, 2, 2], [1, 1, 1], True, False, None
+            )
+
+    check_against_eager(AvgPool3d(), torch.randn(2, 3, 5, 7, 9))
+
+
+def test_lighthouse_constant_pad_matches_eager():
+    class ConstantPad(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.pad.default(
+                x, [1, 0], "constant", 0.0
+            )
+
+    check_against_eager(ConstantPad(), torch.randn(2, 3, 4, 7))
+
+
+def test_lighthouse_cumprod_matches_eager():
+    class Cumprod(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.cumprod.default(x, 1)
+
+    check_against_eager(Cumprod(), torch.rand(4, 8))
+
+
+def test_lighthouse_roll_matches_eager():
+    class Roll(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.roll.default(x, [1, -2], [1, 2])
+
+    check_against_eager(Roll(), torch.randn(2, 3, 4))
+
+
+def test_lighthouse_vit_double_unfold_matches_eager():
+    class Patchify(torch.nn.Module):
+        def forward(self, image):
+            return image.unfold(2, 4, 4).unfold(3, 4, 4)
+
+    check_against_eager(Patchify(), torch.randn(2, 3, 8, 8))
+
+
 def test_sum_empty_dimensions_matches_eager_reduce_all():
     class SumEmptyDimensions(torch.nn.Module):
         def forward(self, x):

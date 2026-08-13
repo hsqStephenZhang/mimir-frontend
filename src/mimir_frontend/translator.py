@@ -150,6 +150,12 @@ class FXGraphTranslator:
         m[torch.cumsum] = self._wrap_cumsum()
         m["cumsum"] = self._wrap_cumsum()
         m["aten.cumsum.default"] = self._wrap_cumsum()
+        m[torch.cumprod] = self._wrap_cumprod()
+        m["aten.cumprod.default"] = self._wrap_cumprod()
+        m[torch.roll] = self._wrap_roll()
+        m["aten.roll.default"] = self._wrap_roll()
+        m["unfold"] = self._wrap_unfold()
+        m["aten.unfold.default"] = self._wrap_unfold()
         m[torch.flatten] = self._wrap_flatten()
         m["aten.flatten.using_ints"] = self._wrap_flatten()
         m["flatten"] = self._wrap_flatten()
@@ -167,10 +173,13 @@ class FXGraphTranslator:
         m[torch.unsqueeze] = self._wrap_unsqueeze()
         m["unsqueeze"] = self._wrap_unsqueeze()
         m["aten.unsqueeze.default"] = self._wrap_unsqueeze()
+        m[torch.nn.functional.pad] = self._wrap_pad()
+        m["aten.pad.default"] = self._wrap_pad()
         m["contiguous"] = self._wrap_contiguous()
         m["aten.contiguous.default"] = self._wrap_contiguous()
         m["detach_"] = self._wrap_alias()
         m["aten.detach_.default"] = self._wrap_alias()
+        m["aten.detach.default"] = self._wrap_alias()
         m["size"] = self._wrap_size()
 
         if hasattr(torch._C, "_log_api_usage_once"):
@@ -194,6 +203,8 @@ class FXGraphTranslator:
         m["aten.full.default"] = self._wrap_full()
         m[torch.zeros] = self._wrap_zeros()
         m["aten.zeros.default"] = self._wrap_zeros()
+        m[torch.ones] = self._wrap_ones()
+        m["aten.ones.default"] = self._wrap_ones()
         m["new_ones"] = self._wrap_new_fill(1)
         m["aten.new_ones.default"] = self._wrap_new_fill(1)
         m["new_zeros"] = self._wrap_new_fill(0)
@@ -296,9 +307,21 @@ class FXGraphTranslator:
         m["aten.max_pool2d_with_indices.default"] = self._wrap_max_pool2d(return_indices=True)
         m[torch.nn.functional.avg_pool2d] = self._wrap_avg_pool2d()
         m["aten.avg_pool2d.default"] = self._wrap_avg_pool2d()
+        m[torch.nn.functional.max_pool1d] = self._wrap_max_pool1d()
+        m["aten.max_pool1d.default"] = self._wrap_max_pool1d()
+        m[torch.nn.functional.max_pool3d] = self._wrap_max_pool3d()
+        m["aten.max_pool3d.default"] = self._wrap_max_pool3d()
+        m[torch.nn.functional.avg_pool1d] = self._wrap_avg_pool1d()
+        m["aten.avg_pool1d.default"] = self._wrap_avg_pool1d()
+        m[torch.nn.functional.avg_pool3d] = self._wrap_avg_pool3d()
+        m["aten.avg_pool3d.default"] = self._wrap_avg_pool3d()
         m[torch.nn.functional.adaptive_avg_pool2d] = self._wrap_adaptive_avg_pool2d()
         m["aten.adaptive_avg_pool2d.default"] = self._wrap_adaptive_avg_pool2d()
         m["adaptive_avg_pool2d"] = self._wrap_adaptive_avg_pool2d()
+        m[torch.nn.functional.adaptive_avg_pool1d] = self._wrap_adaptive_avg_pool1d()
+        m["aten.adaptive_avg_pool1d.default"] = self._wrap_adaptive_avg_pool1d()
+        m[torch.nn.functional.adaptive_avg_pool3d] = self._wrap_adaptive_avg_pool3d()
+        m["aten.adaptive_avg_pool3d.default"] = self._wrap_adaptive_avg_pool3d()
 
         # Indexing / Scatter
         m["aten.index.Tensor"] = self._wrap_index_tensor()
@@ -478,6 +501,36 @@ class FXGraphTranslator:
             return result
         return convert
 
+    def _wrap_max_pool1d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            kernel_size = args[1] if len(args) > 1 else node.kwargs.get("kernel_size")
+            stride = args[2] if len(args) > 2 else node.kwargs.get("stride", None)
+            padding = args[3] if len(args) > 3 else node.kwargs.get("padding", 0)
+            dilation = args[4] if len(args) > 4 else node.kwargs.get("dilation", 1)
+            ceil_mode = args[5] if len(args) > 5 else node.kwargs.get("ceil_mode", False)
+            return self.ops.max_pool1d(
+                x, kernel_size, stride=stride, padding=padding,
+                dilation=dilation, ceil_mode=ceil_mode
+            )
+        return convert
+
+    def _wrap_max_pool3d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            kernel_size = args[1] if len(args) > 1 else node.kwargs.get("kernel_size")
+            stride = args[2] if len(args) > 2 else node.kwargs.get("stride", None)
+            padding = args[3] if len(args) > 3 else node.kwargs.get("padding", 0)
+            dilation = args[4] if len(args) > 4 else node.kwargs.get("dilation", 1)
+            ceil_mode = args[5] if len(args) > 5 else node.kwargs.get("ceil_mode", False)
+            return self.ops.max_pool3d(
+                x, kernel_size, stride=stride, padding=padding,
+                dilation=dilation, ceil_mode=ceil_mode
+            )
+        return convert
+
     def _wrap_avg_pool2d(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -499,6 +552,38 @@ class FXGraphTranslator:
             )
         return convert
 
+    def _wrap_avg_pool1d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            kernel_size = args[1] if len(args) > 1 else node.kwargs.get("kernel_size")
+            stride = args[2] if len(args) > 2 else node.kwargs.get("stride", None)
+            padding = args[3] if len(args) > 3 else node.kwargs.get("padding", 0)
+            ceil_mode = args[4] if len(args) > 4 else node.kwargs.get("ceil_mode", False)
+            count_include_pad = args[5] if len(args) > 5 else node.kwargs.get("count_include_pad", True)
+            return self.ops.avg_pool1d(
+                x, kernel_size, stride=stride, padding=padding,
+                ceil_mode=ceil_mode, count_include_pad=count_include_pad
+            )
+        return convert
+
+    def _wrap_avg_pool3d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            kernel_size = args[1] if len(args) > 1 else node.kwargs.get("kernel_size")
+            stride = args[2] if len(args) > 2 else node.kwargs.get("stride", None)
+            padding = args[3] if len(args) > 3 else node.kwargs.get("padding", 0)
+            ceil_mode = args[4] if len(args) > 4 else node.kwargs.get("ceil_mode", False)
+            count_include_pad = args[5] if len(args) > 5 else node.kwargs.get("count_include_pad", True)
+            divisor_override = args[6] if len(args) > 6 else node.kwargs.get("divisor_override", None)
+            return self.ops.avg_pool3d(
+                x, kernel_size, stride=stride, padding=padding,
+                ceil_mode=ceil_mode, count_include_pad=count_include_pad,
+                divisor_override=divisor_override,
+            )
+        return convert
+
     def _wrap_adaptive_avg_pool2d(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -507,6 +592,20 @@ class FXGraphTranslator:
             if output_size == 1 or output_size == [1, 1] or output_size == (1, 1):
                 return self.ops.mean(x, dim=[2, 3], keepdim=True)
             raise NotImplementedError("adaptive_avg_pool2d currently supports output_size=1 only")
+        return convert
+
+    def _wrap_adaptive_avg_pool1d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            output_size = args[1] if len(args) > 1 else node.kwargs.get("output_size")
+            return self.ops.adaptive_avg_pool1d(args[0], output_size)
+        return convert
+
+    def _wrap_adaptive_avg_pool3d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            output_size = args[1] if len(args) > 1 else node.kwargs.get("output_size")
+            return self.ops.adaptive_avg_pool3d(args[0], output_size)
         return convert
 
     def _wrap_index_tensor(self):
@@ -788,6 +887,28 @@ class FXGraphTranslator:
             return self.ops.cumsum(args[0], dim, dtype=dtype)
         return convert
 
+    def _wrap_cumprod(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
+            return self.ops.cumprod(args[0], args[1], dtype=dtype)
+        return convert
+
+    def _wrap_roll(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            shifts = args[1] if len(args) > 1 else kwargs.get("shifts")
+            dims = args[2] if len(args) > 2 else kwargs.get("dims")
+            return self.ops.roll(args[0], shifts, dims)
+        return convert
+
+    def _wrap_unfold(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.unfold(args[0], args[1], args[2], args[3])
+        return convert
+
     def _wrap_getitem(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -1042,6 +1163,14 @@ class FXGraphTranslator:
             return self.ops.unsqueeze(args[0], args[1])
         return convert
 
+    def _wrap_pad(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            mode = args[2] if len(args) > 2 else node.kwargs.get("mode", "constant")
+            value = args[3] if len(args) > 3 else node.kwargs.get("value")
+            return self.ops.pad(args[0], args[1], mode=mode, value=value)
+        return convert
+
     def _wrap_contiguous(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -1092,6 +1221,12 @@ class FXGraphTranslator:
         return convert
 
     def _wrap_zeros(self):
+        return self._wrap_constant_fill(0, "zeros")
+
+    def _wrap_ones(self):
+        return self._wrap_constant_fill(1, "ones")
+
+    def _wrap_constant_fill(self, fill_value, operator_name):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             shape = args[0] if len(args) == 1 else tuple(args)
@@ -1100,18 +1235,24 @@ class FXGraphTranslator:
             pin_memory = node.kwargs.get("pin_memory")
             requires_grad = node.kwargs.get("requires_grad", False)
             if device is not None and torch.device(device).type != "cpu":
-                raise NotImplementedError("zeros currently supports CPU tensors only")
+                raise NotImplementedError(
+                    f"{operator_name} currently supports CPU tensors only"
+                )
             if layout not in (None, torch.strided):
-                raise NotImplementedError("zeros currently supports strided layout only")
+                raise NotImplementedError(
+                    f"{operator_name} currently supports strided layout only"
+                )
             if pin_memory not in (None, False):
-                raise NotImplementedError("zeros pin_memory=True is not implemented")
+                raise NotImplementedError(
+                    f"{operator_name} pin_memory=True is not implemented"
+                )
             if requires_grad:
                 raise NotImplementedError(
-                    "zeros requires_grad=True is not implemented"
+                    f"{operator_name} requires_grad=True is not implemented"
                 )
             return self.ops.full(
                 shape,
-                0,
+                fill_value,
                 dtype=node.kwargs.get("dtype"),
             )
         return convert
