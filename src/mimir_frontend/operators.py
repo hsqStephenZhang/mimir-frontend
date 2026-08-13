@@ -1212,7 +1212,10 @@ class OperatorLibrary:
         ]
         physical_dims = [dims[axis] for axis in physical_axes]
         rank = len(physical_dims)
-        if dim is None and kind == "sum" and not keepdim:
+        reduce_all = dim is None or (
+            isinstance(dim, (tuple, list)) and len(dim) == 0
+        )
+        if reduce_all and kind == "sum" and not keepdim:
             callee = self.world.annex(torch_dialect.sum_all_op.value)
             callee = self.world.app(callee, self._torch_semantics(input))
             callee = self._apply_grouped(
@@ -1222,7 +1225,7 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, [])
 
-        if dim is None:
+        if reduce_all:
             dim_list = list(range(logical_rank))
         else:
             dim_list = list(dim) if isinstance(dim, (tuple, list)) else [dim]
