@@ -1109,6 +1109,63 @@ class OperatorLibrary:
             return self._reduce_aff(input, self.F32, self._f32_reduce_lambda(self.f32_max_axm), self._f32_float_lit(-float("inf")), dim=dim, keepdim=True)
         return self._torch_reduce("amax", input, dim, keepdim)
 
+    def dim_extrema(self, input, dim, keepdim=False, *, kind="max"):
+        """Map value+index max/min; tie and NaN semantics live in MimIR."""
+        dims = self.shape_of(input)
+        rank = len(dims)
+        canonical = dim + rank if dim < 0 else dim
+        physical_axes = [
+            axis for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and dims:
+            physical_axes = [rank - 1]
+        physical_dims = self._physical_dims(dims)
+        reduced_dims = dims[:canonical] + dims[canonical + 1:]
+
+        if 0 <= canonical < rank and canonical not in physical_axes:
+            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self._apply_grouped(
+                callee, [self.I64, self._lit_nat(len(physical_dims))]
+            )
+            indices = self.world.app(
+                callee,
+                self.world.tuple(
+                    [self.world.tuple(physical_dims), self.world.lit_i64(0)]
+                ),
+            )
+            result_dims = list(dims) if keepdim else reduced_dims
+            return (
+                self._remember_shape(input, result_dims),
+                self._remember_shape(indices, result_dims),
+            )
+
+        physical_dim = (
+            physical_axes.index(canonical)
+            if 0 <= canonical < rank and canonical in physical_axes
+            else len(physical_dims)
+        )
+        callee = self.world.annex(
+            torch_dialect.max_dim_op.value
+            if kind == "max"
+            else torch_dialect.min_dim_op.value
+        )
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+        result = self.world.app(callee, input)
+        outputs = [result.proj(3, 1), result.proj(3, 2)]
+        for output in outputs:
+            self._remember_shape(output, reduced_dims)
+        if keepdim:
+            keep_dims = list(dims)
+            keep_dims[canonical] = self._lit_nat(1)
+            outputs = [self.reshape(output, keep_dims) for output in outputs]
+        return tuple(outputs)
+
     def softmax(self, input, dim=-1):
         """Emit API-level softmax; stabilization and reduction live in MimIR."""
         dims = self.shape_of(input)

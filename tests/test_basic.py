@@ -1559,14 +1559,37 @@ def test_value_only_max(shape_kind, rank):
     ir = def_to_string(result)
     assert "%torch.amax_" in ir
 
-def test_tuple_max_is_unsupported():
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_dim_extrema_map_to_structured_torch_result(kind):
     class Model(torch.nn.Module):
         def forward(self, x):
-            return torch.max(x, dim=0)
+            op = torch.max if kind == "max" else torch.min
+            values, indices = op(x, dim=-1, keepdim=True)
+            return values + indices.to(torch.float32)
 
     world = make_world()
-    with pytest.raises(NotImplementedError):
-        translate_model(Model(), make_inputs(world, 1, "static", 3))
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+
+    assert isinstance(result, mim.Def)
+    ir = def_to_string(result)
+    assert f"%torch.{kind}_dim_op" in ir
+    assert "%torch.slice_op" not in ir
+
+
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_dim_extrema_folded_singleton_axis_is_static(kind):
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 1, 3)])[0]
+    ops._remember_shape(
+        x, [world.lit_nat(2), world.lit_nat(1), world.lit_nat(3)]
+    )
+
+    values, indices = ops.dim_extrema(x, 1, keepdim=False, kind=kind)
+
+    assert [dim.get_nat() for dim in ops.shape_of(values)] == [2, 3]
+    assert [dim.get_nat() for dim in ops.shape_of(indices)] == [2, 3]
+    assert "%torch.full_op" in def_to_string(indices)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank,dim,keepdim", [(3, -1, True), (3, (1, 2), True)])

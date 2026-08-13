@@ -176,6 +176,32 @@ def test_var_mean_dim_overload_matches_eager(unbiased):
     check_against_eager(VarMeanDim(), torch.randn(2, 3), equal_nan=True)
 
 
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_dim_extrema_values_indices_and_ties_match_eager(kind):
+    class DimExtrema(torch.nn.Module):
+        def forward(self, x):
+            op = torch.max if kind == "max" else torch.min
+            values, indices = op(x, dim=-1, keepdim=True)
+            return values, indices.to(torch.float32)
+
+    # Repeated extrema and NaNs both require first-index tie breaking.
+    x = torch.tensor(
+        [[3.0, 3.0, -2.0], [1.0, -4.0, -4.0], [float("nan"), 5.0, float("nan")]]
+    )
+    check_against_eager(DimExtrema(), x, equal_nan=True)
+
+
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_dim_extrema_folded_singleton_axis_matches_eager(kind):
+    class DimExtremaSingleton(torch.nn.Module):
+        def forward(self, x):
+            op = torch.max if kind == "max" else torch.min
+            values, indices = op(x, dim=1)
+            return values, indices.to(torch.float32)
+
+    check_against_eager(DimExtremaSingleton(), torch.randn(2, 1, 3))
+
+
 @pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
 def test_addmm_matches_eager(self_shape):
     check_against_eager(

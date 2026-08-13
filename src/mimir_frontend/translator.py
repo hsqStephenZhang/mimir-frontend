@@ -212,9 +212,12 @@ class FXGraphTranslator:
         m["aten.sum.dim_IntList"] = self._wrap_reduction(self.ops.sum)
         m[torch.amax] = self._wrap_reduction(self.ops.amax)
         m["aten.amax.default"] = self._wrap_reduction(self.ops.amax)
-        m[torch.max] = self._wrap_max()
-        m["aten.max.default"] = self._wrap_max()
-        m["aten.max.dim"] = self._wrap_max()
+        m[torch.max] = self._wrap_max("max")
+        m["aten.max.default"] = self._wrap_max("max")
+        m["aten.max.dim"] = self._wrap_max("max")
+        m[torch.min] = self._wrap_max("min")
+        m["aten.min.default"] = self._wrap_max("min")
+        m["aten.min.dim"] = self._wrap_max("min")
         m[torch.mean] = self._wrap_reduction(self.ops.mean)
         m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
@@ -603,11 +606,17 @@ class FXGraphTranslator:
             return op_func(input_def, dim=dim, keepdim=keepdim)
         return convert
 
-    def _wrap_max(self):
+    def _wrap_max(self, kind):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             if len(args) > 1 or "dim" in node.kwargs:
-                raise NotImplementedError("torch.max with dim is not implemented (requires tuple return)")
+                dim = args[1] if len(args) > 1 else node.kwargs["dim"]
+                keepdim = args[2] if len(args) > 2 else node.kwargs.get("keepdim", False)
+                return self.ops.dim_extrema(
+                    args[0], dim, keepdim=keepdim, kind=kind
+                )
+            if kind == "min":
+                raise NotImplementedError("torch.min without dim is not implemented")
             return self.ops.amax(args[0], dim=None, keepdim=False)
         return convert
 
