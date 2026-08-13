@@ -13,8 +13,8 @@ class FXGraphTranslator:
         self.world = world
         self.module = module
         self.ops = OperatorLibrary(world)
-        self.env: dict[fx.Node, mim.Def] = {}
-        self.convert_map: dict[str | Callable, Callable[[fx.Node], mim.Def]] = self.create_convert_map()
+        self.env: dict[fx.Node, object] = {}
+        self.convert_map: dict[str | Callable, Callable[[fx.Node], object]] = self.create_convert_map()
 
     def create_convert_map(self) -> dict:
         m = {}
@@ -753,6 +753,15 @@ class FXGraphTranslator:
             args = self.retrieve_args(node)
             obj = args[0]
             index = args[1]
+
+            # Multi-result Torch operators stay as Python structure until FX
+            # getitem selects a result. Their computation remains in MimIR.
+            if isinstance(obj, (tuple, list)):
+                if isinstance(index, int):
+                    return obj[index]
+                raise TypeError(
+                    f"structured result requires an integer index, got {index!r}"
+                )
             
             # Check if obj is a tensor by inspecting its type
             ty = obj.type()

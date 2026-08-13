@@ -1513,9 +1513,11 @@ def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
 
     world = make_world()
     result = translate_model(Model(), make_inputs(world, 1, shape_kind, rank))
-    assert isinstance(result, mim.Def)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert all(isinstance(value, mim.Def) for value in result)
     # var_mean returns a tuple of (var, mean)
-    ir = def_to_string(result)
+    ir = "\n".join(def_to_string(value) for value in result)
     assert "%torch.var_mean_dims_op" in ir
     if keepdim:
         assert "%torch.reshape_op" in ir
@@ -1532,8 +1534,25 @@ def test_var_mean_accepts_scalar_correction(correction):
     world = make_world()
     result = translate_model(Model(), make_inputs(world, 1, "static", 3))
 
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert all(isinstance(value, mim.Def) for value in result)
+    assert "%torch.var_mean_dims_op" in def_to_string(result[0])
+
+
+def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            variance, mean = torch.var_mean(x, dim=-1, correction=0)
+            return variance + mean
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+
     assert isinstance(result, mim.Def)
-    assert "%torch.var_mean_dims_op" in def_to_string(result)
+    ir = def_to_string(result)
+    assert "%torch.var_mean_dims_op" in ir
+    assert "%torch.slice_op" not in ir
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])

@@ -1461,7 +1461,9 @@ class OperatorLibrary:
         ).output_dims
         outputs = []
         for index in range(2):
-            output = result.proj(2, index)
+            # The Torch axiom carries an internal Bool tag to keep two
+            # equal-shaped tensors from folding into one rank-higher tensor.
+            output = result.proj(3, index + 1)
             self._remember_shape(output, reduced_dims)
             if keepdim:
                 keep_dims = self.rules.reduce_shape_spec(
@@ -1469,7 +1471,10 @@ class OperatorLibrary:
                 ).output_dims
                 output = self.reshape(output, keep_dims)
             outputs.append(output)
-        return self.world.tuple(outputs)
+        # Keep multiple results as frontend structure. Constructing a MimIR
+        # tuple here would normalize equal-shaped tensors into one tensor with
+        # an extra leading dimension, changing tuple projection into slicing.
+        return tuple(outputs)
 
     # Linear Algebra
     def mm(self, lhs, rhs):

@@ -141,6 +141,20 @@ def test_amax_empty_dimensions_matches_eager_reduce_all():
     check_against_eager(AmaxEmptyDimensions(), -torch.rand(2, 3, 4))
 
 
+def test_var_mean_scalar_corrections_match_eager():
+    class VarMeanCorrections(torch.nn.Module):
+        def forward(self, x):
+            negative, _ = torch.var_mean(x, dim=-1, correction=-1)
+            equal, _ = torch.var_mean(x, dim=-1, correction=3)
+            greater, _ = torch.var_mean(x, dim=-1, correction=4)
+            fractional, _ = torch.var_mean(x, dim=-1, correction=0.5)
+            return negative, equal, greater, fractional
+
+    check_against_eager(
+        VarMeanCorrections(), torch.randn(2, 3), equal_nan=True
+    )
+
+
 @pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
 def test_addmm_matches_eager(self_shape):
     check_against_eager(
