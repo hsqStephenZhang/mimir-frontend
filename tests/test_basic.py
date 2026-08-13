@@ -387,6 +387,63 @@ def test_add_sub_scalar_lhs_preserve_operand_roles(torch_op, expected_op):
     assert "1077936128:(%math.F (23, 8))" in text
 
 
+@pytest.mark.parametrize(
+    "torch_op,expected_op",
+    [
+        (torch.addcmul, "%torch.addcmul_op"),
+        (torch.addcdiv, "%torch.addcdiv_op"),
+    ],
+)
+def test_addc_ops_map_directly_and_preserve_value(torch_op, expected_op):
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, tensor1, tensor2):
+            return torch_op(self_tensor, tensor1, tensor2, value=2.5)
+
+    world = make_world()
+    logical_shapes = [(2, 1), (1, 3), (2, 3)]
+    inputs = make_static_inputs_with_shapes(world, logical_shapes)
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    for input_def, shape in zip(inputs, logical_shapes):
+        translator.ops._remember_shape(
+            input_def, [world.lit_nat(extent) for extent in shape]
+        )
+    result = translator.translate(traced.graph, inputs)
+    text = def_to_string(result)
+
+    assert expected_op in text
+    assert "1075838976:(%math.F (23, 8))" in text
+    assert "%torch.expand_op" not in text
+
+
+def test_addcdiv_rejects_integer_inputs():
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, tensor1, tensor2):
+            return torch.addcdiv(self_tensor, tensor1, tensor2)
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 3), (2, 3), (2, 3)], elem_type=world.type_i64()
+    )
+
+    with pytest.raises(TypeError, match="addcdiv does not support integer inputs"):
+        translate_model(Model(), inputs)
+
+
+def test_addcmul_reports_unsupported_integer_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, tensor1, tensor2):
+            return torch.addcmul(self_tensor, tensor1, tensor2)
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 3), (2, 3), (2, 3)], elem_type=world.type_i64()
+    )
+
+    with pytest.raises(NotImplementedError, match="addcmul_op dtype.*not implemented"):
+        translate_model(Model(), inputs)
+
+
 @pytest.mark.parametrize("name,torch_op,python_op", SUPPORTED_COMPARISON_OPS)
 def test_comparison_operator_returns_bool_tensor_all_shapes(name, torch_op, python_op):
     class TorchModel(torch.nn.Module):

@@ -74,6 +74,14 @@ class FXGraphTranslator:
             m[torch.nn.functional._threshold] = threshold
         m["aten.threshold.default"] = threshold
         m["threshold"] = threshold
+        for torch_op, name, op_func in (
+            (torch.addcmul, "addcmul", self.ops.addcmul),
+            (torch.addcdiv, "addcdiv", self.ops.addcdiv),
+        ):
+            wrapper = self._wrap_addc(op_func)
+            m[torch_op] = wrapper
+            m[name] = wrapper
+            m[f"aten.{name}.default"] = wrapper
         m[operator.floordiv] = self._wrap_nat_binary(self.ops.nat_floordiv)
 
         # Elementwise Unary
@@ -847,6 +855,13 @@ class FXGraphTranslator:
             if inplace:
                 raise NotImplementedError("in-place threshold is not supported")
             return self.ops.threshold(args[0], args[1], args[2])
+        return convert
+
+    def _wrap_addc(self, op_func):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            value = args[3] if len(args) > 3 else node.kwargs.get("value", 1)
+            return op_func(args[0], args[1], args[2], value=value)
         return convert
 
     def _wrap_convert_element_type(self):

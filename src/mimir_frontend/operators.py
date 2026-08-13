@@ -396,6 +396,79 @@ class OperatorLibrary:
         )
         return self._remember_shape(result, dims)
 
+    def _broadcast_metadata(self, dims, output_dims):
+        physical_axes = [
+            axis for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and dims:
+            physical_axes = [len(dims) - 1]
+        physical_dims = [dims[axis] for axis in physical_axes]
+
+        output_physical_axes = [
+            axis for axis, extent in enumerate(output_dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not output_physical_axes and output_dims:
+            output_physical_axes = [len(output_dims) - 1]
+        output_rank = len(output_physical_axes)
+        idx_type = self.world.type_idx(self._lit_nat(output_rank))
+        offset = len(output_dims) - len(dims)
+        mapped = []
+        for axis in physical_axes:
+            output_axis = offset + axis
+            if output_axis in output_physical_axes:
+                physical_output_axis = output_physical_axes.index(output_axis)
+            elif self._is_lit_nat_value(dims[axis], 1) and output_rank:
+                physical_output_axis = output_rank - 1
+            else:
+                raise ValueError("cannot represent broadcast after singleton folding")
+            mapped.append(self.world.lit(idx_type, physical_output_axis))
+        return physical_dims, self.world.tuple(mapped)
+
+    def _torch_addc(self, name, self_tensor, tensor1, tensor2, *, value=1):
+        tensors = (self_tensor, tensor1, tensor2)
+        elem_types = [self._tensor_element_type(tensor) for tensor in tensors]
+        if len(set(elem_types)) != 1:
+            raise NotImplementedError(
+                f"{name} mixed-dtype promotion is not implemented"
+            )
+        elem_type = elem_types[0]
+        if elem_type not in (self.F32, self.F64):
+            if name == "addcdiv_op":
+                raise TypeError("addcdiv does not support integer inputs")
+            raise NotImplementedError(f"{name} dtype {elem_type} is not implemented")
+
+        logical_shapes = [self.shape_of(tensor) for tensor in tensors]
+        output_dims = logical_shapes[0]
+        for dims in logical_shapes[1:]:
+            output_dims = self.rules.broadcast_shape(output_dims, dims)
+        output_physical_dims = self._physical_dims(output_dims)
+        metadata = []
+        ranks = []
+        for dims in logical_shapes:
+            physical_dims, axis_map = self._broadcast_metadata(dims, output_dims)
+            ranks.append(self._lit_nat(len(physical_dims)))
+            metadata.extend([self.world.tuple(physical_dims), axis_map])
+        metadata.append(self.world.tuple(output_physical_dims))
+
+        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.app(callee, self._torch_semantics(self_tensor))
+        callee = self._apply_grouped(
+            callee, [*ranks, self._lit_nat(len(output_physical_dims))]
+        )
+        callee = self.world.app(callee, self.world.tuple(metadata))
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                self_tensor,
+                tensor1,
+                tensor2,
+                self._float_lit(elem_type, value),
+            ]),
+        )
+        return self._remember_shape(result, output_dims)
+
     def compare(self, op, lhs, rhs):
         return self.binary(op, lhs, rhs, out_type=self.Bool)
 
@@ -468,6 +541,14 @@ class OperatorLibrary:
                 "sub_scalar_lhs_op", lhs, rhs, alpha=alpha
             )
         return self._torch_binary("sub_op", lhs, rhs, alpha=alpha)
+    def addcmul(self, self_tensor, tensor1, tensor2, *, value=1):
+        return self._torch_addc(
+            "addcmul_op", self_tensor, tensor1, tensor2, value=value
+        )
+    def addcdiv(self, self_tensor, tensor1, tensor2, *, value=1):
+        return self._torch_addc(
+            "addcdiv_op", self_tensor, tensor1, tensor2, value=value
+        )
     def mul(self, lhs, rhs):
         if isinstance(rhs, (int, float)):
             return self._torch_scalar("mul_scalar_op", lhs, rhs)

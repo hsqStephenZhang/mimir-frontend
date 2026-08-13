@@ -167,6 +167,33 @@ def test_add_sub_scalar_lhs_alpha_matches_eager(torch_op):
     check_against_eager(Model(), torch.randn(2, 3))
 
 
+@pytest.mark.parametrize("torch_op", [torch.addcmul, torch.addcdiv])
+def test_addc_ops_broadcast_and_value_match_eager(torch_op):
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, tensor1, tensor2):
+            return torch_op(self_tensor, tensor1, tensor2, value=-0.75)
+
+    check_against_eager(
+        Model(),
+        torch.randn(2, 1),
+        torch.randn(1, 3),
+        torch.rand(2, 3) + 0.5,
+    )
+
+
+@pytest.mark.parametrize("torch_op", [torch.addcmul, torch.addcdiv])
+def test_addc_ops_zero_value_preserves_ieee_nan(torch_op):
+    class Model(torch.nn.Module):
+        def forward(self, self_tensor, tensor1, tensor2):
+            return torch_op(self_tensor, tensor1, tensor2, value=0.0)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([1.0, 1.0]),
+        torch.tensor([float("inf"), 2.0]),
+        torch.tensor([0.0, 3.0]),
+        equal_nan=True,
+    )
 @pytest.mark.parametrize("torch_op", [torch.maximum, torch.minimum])
 def test_extrema_propagates_nan_from_either_operand(torch_op):
     class Model(torch.nn.Module):
