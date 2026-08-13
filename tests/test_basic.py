@@ -876,6 +876,19 @@ def test_lighthouse_sequence_helpers_map_to_torch_semantics(
     assert expected_op in def_to_string(result)
 
 
+def test_floating_cumsum_maps_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.cumsum_2d_op" in def_to_string(result)
+
+
 def test_convolution_2d_with_bias_translates_to_conv_and_add():
     class Model(torch.nn.Module):
         def forward(self, x, weight, bias):

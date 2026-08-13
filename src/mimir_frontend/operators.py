@@ -2712,11 +2712,16 @@ class OperatorLibrary:
         return self._remember_shape(result, output_dims)
 
     def cumsum(self, input, dim, *, dtype=None):
-        if self._tensor_element_type(input) != self.Bool:
-            raise NotImplementedError("cumsum currently supports boolean input")
-        if dtype not in (None, torch.int64, torch.long):
+        elem_type = self._tensor_element_type(input)
+        boolean_input = elem_type == self.Bool
+        if boolean_input:
+            if dtype not in (None, torch.int64, torch.long):
+                raise NotImplementedError(
+                    f"boolean cumsum only supports the default int64 result, got {dtype}"
+                )
+        elif dtype not in (None, torch.float32, torch.float):
             raise NotImplementedError(
-                f"boolean cumsum only supports the default int64 result, got {dtype}"
+                f"floating cumsum dtype conversion to {dtype} is not implemented"
             )
         dims = self.shape_of(input)
         rank_val = len(dims)
@@ -2731,18 +2736,41 @@ class OperatorLibrary:
         if not physical_axes and dims:
             physical_axes = [len(dims) - 1]
         if canonical_dim not in physical_axes:
-            raise NotImplementedError("cumsum over a folded singleton axis")
+            if boolean_input:
+                raise NotImplementedError("boolean cumsum over a folded singleton axis")
+            return input
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_dim = physical_axes.index(canonical_dim)
-        if len(physical_dims) == 1:
+        if boolean_input and len(physical_dims) == 1:
             callee = self.world.annex(torch_dialect.cumsum_bool_i64_1d_op.value)
             callee = self.world.app(callee, physical_dims[0])
-        else:
+        elif boolean_input:
             callee = self.world.annex(torch_dialect.cumsum_bool_i64_op.value)
             callee = self._apply_grouped(
                 callee,
                 [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
             )
+            callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+        else:
+            op = (
+                torch_dialect.cumsum_2d_op
+                if len(physical_dims) == 2
+                else torch_dialect.cumsum_op
+            )
+            callee = self.world.annex(op.value)
+            callee = self.world.app(
+                callee, self._torch_semantics(input, floating=True)
+            )
+            if len(physical_dims) == 2:
+                callee = self._apply_grouped(callee, physical_dims)
+            else:
+                callee = self._apply_grouped(
+                    callee,
+                    [
+                        self._lit_nat(len(physical_dims)),
+                        self.world.tuple(physical_dims),
+                    ],
+                )
             callee = self.world.app(callee, self.world.lit_i64(physical_dim))
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
