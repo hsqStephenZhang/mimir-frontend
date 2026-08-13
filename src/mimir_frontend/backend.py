@@ -461,13 +461,27 @@ def mimir_backend(
         keep_alive = driver
 
     fn = lib[name]
-    fn.argtypes = [ctypes.c_void_p] * len(input_shapes)
+    scalar_input = [all(extent == 1 for extent in shape) for shape in input_shapes]
+    scalar_ctypes = {
+        torch.float32: ctypes.c_float,
+        torch.int64: ctypes.c_int64,
+    }
+    fn.argtypes = [
+        scalar_ctypes[dtype] if is_scalar else ctypes.c_void_p
+        for dtype, is_scalar in zip(input_dtypes, scalar_input, strict=True)
+    ]
     fn.restype = ctypes.POINTER(ctypes.c_float)
 
     def compiled(*args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # Keep the contiguous buffers referenced until the call returns.
         buffers = [a.detach().contiguous() for a in args]
-        out_ptr = fn(*[b.data_ptr() for b in buffers])
+        native_args = [
+            scalar_ctypes[dtype](buffer.item()) if is_scalar else buffer.data_ptr()
+            for buffer, dtype, is_scalar in zip(
+                buffers, input_dtypes, scalar_input, strict=True
+            )
+        ]
+        out_ptr = fn(*native_args)
         array = ctypes.cast(out_ptr, ctypes.POINTER(ctypes.c_float * total_numel)).contents
         flat = torch.frombuffer(array, dtype=torch.float32).clone()
         _LIBC.free(ctypes.cast(out_ptr, ctypes.c_void_p))

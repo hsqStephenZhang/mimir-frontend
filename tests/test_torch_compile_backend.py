@@ -644,6 +644,18 @@ def test_rank0_bool_tensor_broadcast_matches_eager():
     check_against_eager(ScalarMask(), torch.randn(2, 3))
 
 
+def test_singleton_tensor_multiply_matches_eager():
+    class MatrixSingletonMultiply(torch.nn.Module):
+        def forward(self, matrix, scalar_tensor):
+            return matrix * scalar_tensor
+
+    check_against_eager(
+        MatrixSingletonMultiply(),
+        torch.rand(2, 8),
+        torch.tensor([3.14]),
+    )
+
+
 def test_two_tensor_advanced_index_matches_eager():
     class Index2D(torch.nn.Module):
         def forward(self, x, rows, columns):
