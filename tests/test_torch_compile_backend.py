@@ -117,6 +117,14 @@ def test_linear_mlp_matches_eager():
     check_against_eager(LinearMLP(), torch.randn(4, 16))
 
 
+def test_sum_empty_dimensions_matches_eager_reduce_all():
+    class SumEmptyDimensions(torch.nn.Module):
+        def forward(self, x):
+            return x + torch.sum(x, dim=[])
+
+    check_against_eager(SumEmptyDimensions(), torch.randn(2, 3, 4))
+
+
 @pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
 def test_addmm_matches_eager(self_shape):
     check_against_eager(
