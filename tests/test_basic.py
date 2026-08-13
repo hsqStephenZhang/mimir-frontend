@@ -994,17 +994,17 @@ def test_index_tensor_translates_to_gather_dim0():
             return torch.ops.aten.index.Tensor(x, [index])
 
     world = make_world()
-    idx_elem = world.type_idx(world.lit_nat(4))
-    x, index = make_static_inputs_with_shapes(world, [(4, 3), (2,)], elem_type=FXGraphTranslator(world).ops.F32)
-    index = world.mut_con(world.arr(world.lit_nat(2), idx_elem)).var()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(4, 3)], elem_type=ops.F32)[0]
+    index = make_static_inputs_with_shapes(world, [(2,)], elem_type=ops.I64)[0]
 
     result = translate_model(Model(), [x, index])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%tensor.gather" in def_to_string(result)
+    assert "%torch.embedding_op" in def_to_string(result)
 
 
-def test_aten_gather_translates_to_tensor_gather():
+def test_aten_gather_translates_to_torch_gather():
     class Model(torch.nn.Module):
         def forward(self, x, index):
             return torch.ops.aten.gather.default(x, 1, index)
@@ -1012,14 +1012,12 @@ def test_aten_gather_translates_to_tensor_gather():
     world = make_world()
     ops = FXGraphTranslator(world).ops
     x = make_static_inputs_with_shapes(world, [(2, 4)], elem_type=ops.F32)[0]
-    index = make_static_inputs_with_shapes(
-        world, [(2, 3)], elem_type=world.type_idx(world.lit_nat(4))
-    )[0]
+    index = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=ops.I64)[0]
 
     result = translate_model(Model(), [x, index])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%tensor.gather" in def_to_string(result)
+    assert "%torch.gather_op" in def_to_string(result)
 
 
 def test_embedding_translates_to_dim0_gather():
@@ -1188,7 +1186,7 @@ def test_scalar_torch_tensor_constant_is_canonicalized():
     assert torch.tensor in translator.convert_map
 
 
-def test_scatter_src_translates_to_tensor_scatter():
+def test_scatter_src_translates_to_torch_scatter_src():
     class Model(torch.nn.Module):
         def forward(self, x, index, src):
             return torch.ops.aten.scatter.src(x, 0, index, src)
@@ -1196,13 +1194,29 @@ def test_scatter_src_translates_to_tensor_scatter():
     world = make_world()
     ops = FXGraphTranslator(world).ops
     x = make_static_inputs_with_shapes(world, [(4, 3)], elem_type=ops.F32)[0]
-    index = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=world.type_idx(world.lit_nat(4)))[0]
+    index = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=ops.I64)[0]
     src = make_static_inputs_with_shapes(world, [(3, 3)], elem_type=ops.F32)[0]
 
     result = translate_model(Model(), [x, index, src])
 
     assert tensor_shape_values(result) == [4, 3]
-    assert "%tensor.scatter" in def_to_string(result)
+    assert "%torch.scatter_src_op" in def_to_string(result)
+
+
+def test_scatter_value_translates_to_torch_scatter_value():
+    class Model(torch.nn.Module):
+        def forward(self, x, index):
+            return torch.ops.aten.scatter.value(x, -1, index, 2.5)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 4)], elem_type=ops.F32)[0]
+    index = make_static_inputs_with_shapes(world, [(2, 3)], elem_type=ops.I64)[0]
+
+    result = translate_model(Model(), [x, index])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.scatter_value_op" in def_to_string(result)
 
 
 def test_alias_returns_the_same_ssa_value():

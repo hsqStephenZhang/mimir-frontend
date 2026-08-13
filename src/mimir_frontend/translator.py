@@ -304,8 +304,9 @@ class FXGraphTranslator:
         m["aten.index.Tensor"] = self._wrap_index_tensor()
         m[torch.gather] = self._wrap_gather()
         m["aten.gather.default"] = self._wrap_gather()
-        m["aten.scatter.src"] = self._wrap_scatter()
-        m["aten.scatter.default"] = self._wrap_scatter()
+        m["aten.scatter.src"] = self._wrap_scatter_src()
+        m["aten.scatter.default"] = self._wrap_scatter_src()
+        m["aten.scatter.value"] = self._wrap_scatter_value()
         m["aten.scatter_add.default"] = self._wrap_unsupported("aten.scatter_add")
         m[torch.nn.functional.embedding] = self._wrap_functional_embedding()
         m["aten.embedding.default"] = self._wrap_embedding()
@@ -524,14 +525,16 @@ class FXGraphTranslator:
             return self.ops.gather(args[0], args[2], dim=args[1])
         return convert
 
-    def _wrap_scatter(self):
+    def _wrap_scatter_src(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            x = args[0]
-            dim = args[1]
-            index = args[2]
-            src = args[3]
-            return self.ops.scatter(x, dim, index, src)
+            return self.ops.scatter_src(args[0], args[1], args[2], args[3])
+        return convert
+
+    def _wrap_scatter_value(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.scatter_value(args[0], args[1], args[2], args[3])
         return convert
 
     def _wrap_embedding(self):

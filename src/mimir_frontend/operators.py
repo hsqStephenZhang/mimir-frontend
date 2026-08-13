@@ -2357,30 +2357,20 @@ class OperatorLibrary:
         input_dims = self.shape_of(input)
         index_dims = self.shape_of(index)
         rank_val = len(input_dims)
-        if dim < 0:
-            dim += rank_val
-        if dim < 0 or dim >= rank_val:
-            raise ValueError(f"aten.gather dim {dim} is out of range for rank {rank_val}")
-        if rank_val != len(index_dims):
-            raise NotImplementedError("aten.gather requires index rank to match input rank")
-        for axis, (source_extent, index_extent) in enumerate(zip(input_dims, index_dims)):
-            if axis == dim:
-                continue
-            if isinstance(source_extent, mim.Lit) and isinstance(index_extent, mim.Lit):
-                if index_extent.get_nat() > source_extent.get_nat():
-                    raise ValueError(
-                        "aten.gather index extent exceeds input extent on "
-                        f"non-gather axis {axis}"
-                    )
-
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
-        dim_idx = self.world.lit(self.world.type_idx(rank), dim)
-
-        callee = self.world.annex(tensor.gather.value)
-        callee = self._apply_grouped(callee, [elem_t, rank])
-        callee = self._apply_grouped(callee, [self.world.tuple(input_dims), self.world.tuple(index_dims)])
-        callee = self.world.app(callee, dim_idx)
+        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        callee = self.world.annex(torch_dialect.gather_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [
+                elem_t,
+                rank,
+                self.world.tuple(input_dims),
+                self.world.tuple(index_dims),
+            ],
+        )
+        callee = self.world.app(callee, dimension)
         result = self.world.app(callee, [input, index])
         return self._remember_shape(result, index_dims)
 
@@ -2440,47 +2430,53 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple([input, rows, columns]))
         return self._remember_shape(result, output_dims)
 
-    def scatter(self, input, dim, index, src):
+    def scatter_src(self, input, dim, index, src):
         input_dims = self.shape_of(input)
         index_dims = self.shape_of(index)
-        rank_val = len(input_dims)
-        if dim < 0:
-            dim += rank_val
-        if dim < 0 or dim >= rank_val:
-            raise ValueError(f"aten.scatter dim {dim} is out of range for rank {rank_val}")
-        if rank_val != len(index_dims):
-            raise NotImplementedError("aten.scatter requires index rank to match input rank")
         src_dims = self.shape_of(src)
-        if rank_val != len(src_dims):
-            raise ValueError("aten.scatter src and index must have the same rank")
-        for axis, (source_extent, index_extent) in enumerate(zip(input_dims, index_dims)):
-            if axis == dim:
-                continue
-            if isinstance(source_extent, mim.Lit) and isinstance(index_extent, mim.Lit):
-                if index_extent.get_nat() > source_extent.get_nat():
-                    raise ValueError(
-                        "aten.scatter index extent exceeds input extent on "
-                        f"non-scatter axis {axis}"
-                    )
-        for axis, (src_extent, index_extent) in enumerate(zip(src_dims, index_dims)):
-            if isinstance(src_extent, mim.Lit) and isinstance(index_extent, mim.Lit):
-                if index_extent.get_nat() > src_extent.get_nat():
-                    raise ValueError(
-                        f"aten.scatter index extent exceeds src extent on axis {axis}"
-                    )
-
+        rank_val = len(input_dims)
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
-        dim_idx = self.world.lit(self.world.type_idx(rank), dim)
-
-        callee = self.world.annex(tensor.scatter.value)
-        callee = self._apply_grouped(callee, [elem_t, rank])
+        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        callee = self.world.annex(torch_dialect.scatter_src_op.value)
         callee = self._apply_grouped(
             callee,
-            [self.world.tuple(input_dims), self.world.tuple(index_dims), self.world.tuple(src_dims)],
+            [
+                elem_t,
+                rank,
+                self.world.tuple(input_dims),
+                self.world.tuple(index_dims),
+                self.world.tuple(src_dims),
+            ],
         )
-        callee = self.world.app(callee, dim_idx)
+        callee = self.world.app(callee, dimension)
         result = self.world.app(callee, [input, index, src])
+        return self._remember_shape(result, input_dims)
+
+    def scatter_value(self, input, dim, index, value):
+        input_dims = self.shape_of(input)
+        index_dims = self.shape_of(index)
+        elem_t = self._tensor_element_type(input)
+        rank = self._lit_nat(len(input_dims))
+        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        if isinstance(value, mim.Def):
+            scalar = value
+        elif elem_t == self.I64:
+            scalar = self.world.lit_i64(int(value))
+        else:
+            scalar = self._float_lit(elem_t, value)
+        callee = self.world.annex(torch_dialect.scatter_value_op.value)
+        callee = self._apply_grouped(
+            callee,
+            [
+                elem_t,
+                rank,
+                self.world.tuple(input_dims),
+                self.world.tuple(index_dims),
+            ],
+        )
+        callee = self.world.app(callee, self.world.tuple([dimension, scalar]))
+        result = self.world.app(callee, self.world.tuple([input, index]))
         return self._remember_shape(result, input_dims)
 
     def embedding(self, weight, indices, padding_idx=-1, scale_grad_by_freq=False, sparse=False):

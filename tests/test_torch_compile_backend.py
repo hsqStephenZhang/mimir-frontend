@@ -126,6 +126,35 @@ def test_linear_mlp_matches_eager():
     check_against_eager(LinearMLP(), torch.randn(4, 16))
 
 
+def test_gather_negative_dim_matches_eager():
+    class Gather(torch.nn.Module):
+        def forward(self, x, index):
+            return torch.gather(x, -1, index)
+
+    index = torch.tensor([[3, 0], [1, 2]], dtype=torch.int64)
+    check_against_eager(Gather(), torch.randn(2, 4), index)
+
+
+def test_scatter_src_negative_dim_matches_eager():
+    class ScatterSrc(torch.nn.Module):
+        def forward(self, x, index, src):
+            return torch.ops.aten.scatter.src(x, -1, index, src)
+
+    index = torch.tensor([[3, 0], [1, 2]], dtype=torch.int64)
+    check_against_eager(
+        ScatterSrc(), torch.randn(2, 4), index, torch.randn(2, 2)
+    )
+
+
+def test_scatter_value_negative_dim_matches_eager():
+    class ScatterValue(torch.nn.Module):
+        def forward(self, x, index):
+            return torch.ops.aten.scatter.value(x, -1, index, 2.5)
+
+    index = torch.tensor([[3, 0], [1, 2]], dtype=torch.int64)
+    check_against_eager(ScatterValue(), torch.randn(2, 4), index)
+
+
 def test_sum_empty_dimensions_matches_eager_reduce_all():
     class SumEmptyDimensions(torch.nn.Module):
         def forward(self, x):
