@@ -1657,6 +1657,26 @@ class OperatorLibrary:
         )
         return self.world.app(callee, self.world.tuple([lhs, rhs]))
 
+    def bmm(self, lhs, rhs):
+        """Map `aten.bmm` directly; its rank-3 semantics live in MimIR."""
+        lhs_dims = self._physical_dims(self.shape_of(lhs))
+        rhs_dims = self._physical_dims(self.shape_of(rhs))
+        if len(lhs_dims) != 3 or len(rhs_dims) != 3:
+            raise ValueError("aten.bmm expects two rank-3 tensors")
+
+        batch, rows, contract = lhs_dims
+        rhs_batch, rhs_contract, cols = rhs_dims
+        if not self.rules._same_dim(batch, rhs_batch):
+            raise ValueError("aten.bmm batch dimensions must match")
+        if not self.rules._same_dim(contract, rhs_contract):
+            raise ValueError("aten.bmm contracting dimensions must match")
+
+        callee = self.world.annex(torch_dialect.bmm_op.value)
+        callee = self.world.app(callee, self._torch_semantics(lhs))
+        callee = self._apply_grouped(callee, [batch, rows, contract, cols])
+        result = self.world.app(callee, self.world.tuple([lhs, rhs]))
+        return self._remember_shape(result, [batch, rows, cols])
+
     def linear(self, input, weight, bias=None):
         input_dims = self.shape_of(input)
         weight_dims = self.shape_of(weight)

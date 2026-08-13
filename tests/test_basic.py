@@ -630,6 +630,19 @@ def test_rank4_matmul_maps_directly_to_torch_matmul():
     assert "%torch.matmul_op" in def_to_string(result)
 
 
+def test_bmm_maps_directly_to_torch_bmm():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.bmm(lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(world, [(2, 3, 4), (2, 4, 5)])
+    result = translate_model(Model(), [lhs, rhs])
+
+    assert tensor_shape_values(result) == [2, 3, 5]
+    assert "%torch.bmm_op" in def_to_string(result)
+
+
 def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):

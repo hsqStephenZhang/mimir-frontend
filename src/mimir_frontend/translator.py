@@ -257,9 +257,11 @@ class FXGraphTranslator:
 
         # Linear Algebra
         m[torch.mm] = self._wrap_binary(self.ops.mm)
+        m[torch.bmm] = self._wrap_binary(self.ops.bmm)
         m[torch.matmul] = self._wrap_binary(self.ops.matmul)
         m[operator.matmul] = self._wrap_binary(self.ops.matmul)
         m["aten.mm.default"] = self._wrap_binary(self.ops.mm)
+        m["aten.bmm.default"] = self._wrap_binary(self.ops.bmm)
         m["aten.matmul.default"] = self._wrap_binary(self.ops.matmul)
         m[torch.addmm] = self._wrap_addmm()
         m["aten.addmm.default"] = self._wrap_addmm()

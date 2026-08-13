@@ -749,6 +749,18 @@ def test_rank4_matmul_matches_eager():
     )
 
 
+def test_bmm_matches_eager():
+    class BatchedMatmul(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.bmm(lhs, rhs)
+
+    check_against_eager(
+        BatchedMatmul(),
+        torch.randn(2, 3, 4),
+        torch.randn(2, 4, 5),
+    )
+
+
 @pytest.mark.parametrize(
     "lhs_shape,rhs_shape",
     [
