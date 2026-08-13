@@ -1332,6 +1332,23 @@ def test_sum_empty_dimensions_reduce_all(dim):
     assert "%torch.sum_all_op" in def_to_string(result)
 
 
+@pytest.mark.parametrize("dim", [[], ()])
+def test_mean_empty_dimensions_reduce_all(dim):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.mean(x, dim=dim)
+
+    world = make_world()
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(
+        traced.graph, make_inputs(world, 1, "static", 3)
+    )
+
+    assert translator.ops.shape_of(result) == []
+    assert "%torch.mean_dims_op" in def_to_string(result)
+
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank,dim,keepdim", [(1, None, False), (1, 0, True), (3, -1, True), (3, (1, 2), True)])
 def test_sum_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
