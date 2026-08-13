@@ -48,6 +48,17 @@ class FXGraphTranslator:
             for name in names:
                 m[name] = wrapper
 
+        # `aten.add` and `aten.sub` have a keyword-only alpha parameter. Keep
+        # it at the Torch boundary instead of silently dropping it in the
+        # generic two-argument wrapper.
+        for torch_op, python_op, names, func in binary_ops[:2]:
+            wrapper = self._wrap_alpha_binary(func)
+            m[torch_op] = wrapper
+            m[torch_op.__name__] = wrapper
+            m[python_op] = wrapper
+            for name in names:
+                m[name] = wrapper
+
         m[operator.iadd] = self._wrap_binary(self.ops.add)
         m["aten.add_.Tensor"] = self._wrap_binary(self.ops.add)
 
@@ -56,6 +67,13 @@ class FXGraphTranslator:
         m["aten.clamp.Tensor"] = self._wrap_clamp()
         m[torch.nn.functional.hardtanh] = self._wrap_hardtanh()
         m["aten.hardtanh.default"] = self._wrap_hardtanh()
+        threshold = self._wrap_threshold()
+        m[torch.threshold] = threshold
+        m[torch.nn.functional.threshold] = threshold
+        if hasattr(torch.nn.functional, "_threshold"):
+            m[torch.nn.functional._threshold] = threshold
+        m["aten.threshold.default"] = threshold
+        m["threshold"] = threshold
         m[operator.floordiv] = self._wrap_nat_binary(self.ops.nat_floordiv)
 
         # Elementwise Unary
@@ -293,6 +311,13 @@ class FXGraphTranslator:
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             return op_func(args[0], args[1])
+        return convert
+
+    def _wrap_alpha_binary(self, op_func):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            alpha = args[2] if len(args) > 2 else node.kwargs.get("alpha", 1)
+            return op_func(args[0], args[1], alpha=alpha)
         return convert
 
     def _wrap_nat_binary(self, op_func):
@@ -813,6 +838,15 @@ class FXGraphTranslator:
             min_val = args[1] if len(args) > 1 else node.kwargs.get("min_val", -1.0)
             max_val = args[2] if len(args) > 2 else node.kwargs.get("max_val", 1.0)
             return self.ops.hardtanh(x, min_val=min_val, max_val=max_val)
+        return convert
+
+    def _wrap_threshold(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            inplace = args[3] if len(args) > 3 else node.kwargs.get("inplace", False)
+            if inplace:
+                raise NotImplementedError("in-place threshold is not supported")
+            return self.ops.threshold(args[0], args[1], args[2])
         return convert
 
     def _wrap_convert_element_type(self):

@@ -269,7 +269,7 @@ class OperatorLibrary:
         
         return self._remember_shape(res, output_dims)
 
-    def _torch_binary(self, name, lhs, rhs, out_type=None):
+    def _torch_binary(self, name, lhs, rhs, out_type=None, *, alpha=None):
         """Emit a Torch dialect binary op after frontend broadcasting."""
         if isinstance(rhs, (int, float)) or isinstance(lhs, (int, float)):
             scalar_ops = {
@@ -315,7 +315,10 @@ class OperatorLibrary:
         callee = self.world.annex(getattr(torch_dialect, name).value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(callee, [rank, shape])
-        result = self.world.app(callee, self.world.tuple([lhs, rhs]))
+        operands = [lhs, rhs]
+        if alpha is not None:
+            operands.append(self._float_lit(elem_type, alpha))
+        result = self.world.app(callee, self.world.tuple(operands))
         return self._remember_shape(result, output_dims)
 
     def _torch_unary(self, name, input, *, floating=False, out_type=None):
@@ -332,7 +335,7 @@ class OperatorLibrary:
         result = self.world.app(callee, input)
         return self._remember_shape(result, dims)
 
-    def _torch_scalar(self, name, input, scalar, *, floating=False):
+    def _torch_scalar(self, name, input, scalar, *, floating=False, alpha=None):
         dims = self.shape_of(input)
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(input)
@@ -360,8 +363,37 @@ class OperatorLibrary:
         elif elem_type == self.I64:
             scalar_def = self.world.lit_i64(int(scalar))
         else:
-            scalar_def = self._f32_float_lit(scalar)
-        result = self.world.app(callee, self.world.tuple([input, scalar_def]))
+            scalar_def = self._float_lit(elem_type, scalar)
+        operands = [input, scalar_def]
+        if alpha is not None:
+            if elem_type == self.I64:
+                if not isinstance(alpha, (int, bool)):
+                    raise TypeError("integer add/sub alpha must be integral")
+                alpha_def = self.world.lit_i64(int(alpha))
+            else:
+                alpha_def = self._float_lit(elem_type, alpha)
+            operands.append(alpha_def)
+        result = self.world.app(callee, self.world.tuple(operands))
+        return self._remember_shape(result, dims)
+
+    def _torch_scalar_lhs(self, name, scalar, tensor_value, *, alpha=1):
+        dims = self.shape_of(tensor_value)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(tensor_value)
+        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.app(callee, self._torch_semantics(tensor_value))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                self._float_lit(elem_type, scalar),
+                tensor_value,
+                self._float_lit(elem_type, alpha),
+            ]),
+        )
         return self._remember_shape(result, dims)
 
     def compare(self, op, lhs, rhs):
@@ -420,16 +452,22 @@ class OperatorLibrary:
         return lam
 
     # Arithmetic
-    def add(self, lhs, rhs):
+    def add(self, lhs, rhs, *, alpha=1):
         if isinstance(rhs, (int, float)):
-            return self._torch_scalar("add_scalar_op", lhs, rhs)
+            return self._torch_scalar("add_scalar_op", lhs, rhs, alpha=alpha)
         if isinstance(lhs, (int, float)):
-            return self._torch_scalar("add_scalar_op", rhs, lhs)
-        return self._torch_binary("add_op", lhs, rhs)
-    def sub(self, lhs, rhs):
+            return self._torch_scalar_lhs(
+                "add_scalar_lhs_op", lhs, rhs, alpha=alpha
+            )
+        return self._torch_binary("add_op", lhs, rhs, alpha=alpha)
+    def sub(self, lhs, rhs, *, alpha=1):
         if isinstance(rhs, (int, float)):
-            return self._torch_scalar("sub_scalar_op", lhs, rhs)
-        return self._torch_binary("sub_op", lhs, rhs)
+            return self._torch_scalar("sub_scalar_op", lhs, rhs, alpha=alpha)
+        if isinstance(lhs, (int, float)):
+            return self._torch_scalar_lhs(
+                "sub_scalar_lhs_op", lhs, rhs, alpha=alpha
+            )
+        return self._torch_binary("sub_op", lhs, rhs, alpha=alpha)
     def mul(self, lhs, rhs):
         if isinstance(rhs, (int, float)):
             return self._torch_scalar("mul_scalar_op", lhs, rhs)
@@ -461,26 +499,54 @@ class OperatorLibrary:
     # Extrema
     def maximum(self, lhs, rhs): return self._torch_binary("maximum_op", lhs, rhs)
     def minimum(self, lhs, rhs): return self._torch_binary("minimum_op", lhs, rhs)
+
+    def _clamp_scalar_bounds(self, x, min_val, max_val):
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(x)
+
+        def optional_bound(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), elem_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value),
+                self._float_lit(elem_type, value),
+            )
+
+        callee = self.world.annex(torch_dialect.clamp_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                x,
+                optional_bound(min_val),
+                optional_bound(max_val),
+            ]),
+        )
+        return self._remember_shape(result, dims)
     
     def clamp_max(self, x, max_val):
         if isinstance(max_val, (int, float)):
-            lam = self._f32_unary_lambda(
-                self.f32_min_axm,
-                lambda v: [v, self._f32_float_lit(float(max_val))]
-            )
-            return self.unary(lam, x)
+            return self._clamp_scalar_bounds(x, None, max_val)
         return self.minimum(x, max_val)
 
     def clamp_min(self, x, min_val):
         if isinstance(min_val, (int, float)):
-            lam = self._f32_unary_lambda(
-                self.f32_max_axm,
-                lambda v: [v, self._f32_float_lit(float(min_val))]
-            )
-            return self.unary(lam, x)
+            return self._clamp_scalar_bounds(x, min_val, None)
         return self.maximum(x, min_val)
 
     def clamp(self, x, min_val=None, max_val=None):
+        if all(
+            value is None or isinstance(value, (int, float))
+            for value in (min_val, max_val)
+        ):
+            return self._clamp_scalar_bounds(x, min_val, max_val)
         res = x
         if min_val is not None:
             res = self.clamp_min(res, min_val)
@@ -519,11 +585,27 @@ class OperatorLibrary:
     def rsqrt(self, x): return self._torch_unary("rsqrt_op", x, floating=True)
     
     def relu(self, x):
-        lam = self._f32_unary_lambda(
-            self.f32_max_axm,
-            lambda v: [self._f32_float_lit(0.0), v],
-        )
         return self._torch_unary("relu_op", x)
+
+    def threshold(self, x, threshold, value):
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(x)
+        callee = self.world.annex(torch_dialect.threshold_op.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple([
+                x,
+                self._float_lit(elem_type, threshold),
+                self._float_lit(elem_type, value),
+            ]),
+        )
+        return self._remember_shape(result, dims)
 
     def reciprocal(self, x):
         lam = self._f32_unary_lambda(

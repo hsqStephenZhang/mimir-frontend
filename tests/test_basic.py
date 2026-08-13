@@ -183,6 +183,17 @@ def test_functional_relu_translates():
     assert "%torch.relu_op" in def_to_string(result)
 
 
+def test_functional_threshold_translates_to_torch_op():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.threshold(x, threshold=0.5, value=-2.0)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 2))
+
+    assert "%torch.threshold_op" in def_to_string(result)
+
+
 def test_shape_of_reads_symbolic_dims_from_mim_def_type():
     world = make_world()
     translator = FXGraphTranslator(world)
@@ -332,6 +343,48 @@ def test_binary_operator_all_shapes(name, torch_op, python_op):
                 return python_op(x, y)
 
         assert_translates_for_all_shapes(PythonModel, 2)
+
+
+@pytest.mark.parametrize(
+    "torch_op,alpha,expected_op,expected_literal",
+    [
+        (torch.add, 3.0, "%torch.add_op", "1077936128:(%math.F (23, 8))"),
+        (torch.sub, 4.0, "%torch.sub_op", "1082130432:(%math.F (23, 8))"),
+    ],
+)
+def test_add_sub_preserve_alpha_at_torch_boundary(
+    torch_op, alpha, expected_op, expected_literal
+):
+    class Model(torch.nn.Module):
+        def forward(self, x, y):
+            return torch_op(x, y, alpha=alpha)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 2, "static", 2))
+    text = def_to_string(result)
+
+    assert expected_op in text
+    assert expected_literal in text
+
+
+@pytest.mark.parametrize(
+    "torch_op,expected_op",
+    [
+        (torch.add, "%torch.add_scalar_lhs_op"),
+        (torch.sub, "%torch.sub_scalar_lhs_op"),
+    ],
+)
+def test_add_sub_scalar_lhs_preserve_operand_roles(torch_op, expected_op):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch_op(2.0, x, alpha=3.0)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 2))
+    text = def_to_string(result)
+
+    assert expected_op in text
+    assert "1077936128:(%math.F (23, 8))" in text
 
 
 @pytest.mark.parametrize("name,torch_op,python_op", SUPPORTED_COMPARISON_OPS)
@@ -1318,6 +1371,7 @@ def test_clamp_scalar_bound(shape_kind, rank):
     result = translate_model(Model(), make_inputs(world, 1, shape_kind, rank))
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
+    assert "%torch.clamp_op" in def_to_string(result)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])

@@ -103,12 +103,14 @@ def _reset_dynamo(monkeypatch, tmp_path_factory):
     torch._dynamo.reset()
 
 
-def check_against_eager(model, *inputs, options=None):
+def check_against_eager(model, *inputs, options=None, equal_nan=False):
     with torch.no_grad():
         want = model(*inputs)
         compiled = torch.compile(model, backend=mimir_backend, options=options)
         got = compiled(*inputs)
-    torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        got, want, rtol=1e-4, atol=1e-4, equal_nan=equal_nan
+    )
 
 
 def test_linear_mlp_matches_eager():
@@ -131,6 +133,105 @@ def test_addmm_beta_zero_does_not_propagate_self_nan():
         torch.full((4,), float("nan")),
         torch.randn(2, 3),
         torch.randn(3, 4),
+    )
+
+
+@pytest.mark.parametrize("torch_op,alpha", [(torch.add, 3.0), (torch.sub, 4.0)])
+def test_add_sub_alpha_matches_eager(torch_op, alpha):
+    class Model(torch.nn.Module):
+        def forward(self, x, y):
+            return torch_op(x, y, alpha=alpha)
+
+    check_against_eager(
+        Model(),
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+    )
+
+
+@pytest.mark.parametrize("torch_op,alpha", [(torch.add, 3.0), (torch.sub, 4.0)])
+def test_add_sub_scalar_alpha_matches_eager(torch_op, alpha):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch_op(x, 2.0, alpha=alpha)
+
+    check_against_eager(Model(), torch.randn(2, 3))
+
+
+@pytest.mark.parametrize("torch_op", [torch.add, torch.sub])
+def test_add_sub_scalar_lhs_alpha_matches_eager(torch_op):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch_op(2.0, x, alpha=3.0)
+
+    check_against_eager(Model(), torch.randn(2, 3))
+
+
+@pytest.mark.parametrize("torch_op", [torch.maximum, torch.minimum])
+def test_extrema_propagates_nan_from_either_operand(torch_op):
+    class Model(torch.nn.Module):
+        def forward(self, x, y):
+            return torch_op(x, y)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([float("nan"), 1.0]),
+        torch.tensor([2.0, float("nan")]),
+        equal_nan=True,
+    )
+
+
+def test_relu_preserves_nan():
+    check_against_eager(
+        torch.nn.ReLU(),
+        torch.tensor([float("nan"), -1.0, 0.0, 2.0]),
+        equal_nan=True,
+    )
+
+
+def test_hardtanh_matches_boundaries_and_preserves_nan():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.hardtanh(x, min_val=-1.0, max_val=1.0)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0, float("nan")]),
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "min_val,max_val",
+    [
+        (-1.0, None),
+        (None, 1.0),
+        (-1.0, 1.0),
+        (float("nan"), None),
+        (None, float("nan")),
+    ],
+)
+def test_clamp_scalar_bounds_preserve_input_nan(min_val, max_val):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.clamp(x, min=min_val, max=max_val)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([float("nan"), -2.0, 0.0, 2.0]),
+        equal_nan=True,
+    )
+
+
+def test_threshold_matches_reference_and_preserves_nan():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.threshold(x, threshold=0.5, value=-2.0)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([-1.0, 0.5, 2.0, float("nan")]),
+        equal_nan=True,
     )
 
 
