@@ -671,6 +671,26 @@ class OperatorLibrary:
     def relu(self, x):
         return self._torch_unary("relu_op", x)
 
+    def leaky_relu(self, x, *, negative_slope=0.01):
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(x)
+        callee = self.world.annex(torch_dialect.leaky_relu_op.value)
+        callee = self.world.app(
+            callee, self._torch_semantics(x, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple(
+                [x, self._float_lit(elem_type, negative_slope)]
+            ),
+        )
+        return self._remember_shape(result, dims)
+
     def threshold(self, x, threshold, value):
         dims = self.shape_of(x)
         physical_dims = self._physical_dims(dims)

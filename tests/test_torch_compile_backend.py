@@ -153,6 +153,14 @@ def test_log_softmax_flip_and_narrow_match_eager():
     check_against_eager(SequenceHelpers(), torch.randn(2, 6))
 
 
+def test_leaky_relu_matches_eager():
+    class LeakyRelu(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.leaky_relu(x, negative_slope=0.2)
+
+    check_against_eager(LeakyRelu(), torch.randn(2, 6))
+
+
 def test_gather_negative_dim_matches_eager():
     class Gather(torch.nn.Module):
         def forward(self, x, index):

@@ -110,6 +110,10 @@ class FXGraphTranslator:
             if name: m[name] = wrapper
         m[operator.neg] = self._wrap_unary(self.ops.neg)
         m["aten.relu_.default"] = self._wrap_unary(self.ops.relu)
+        leaky_relu = self._wrap_leaky_relu()
+        m[torch.nn.functional.leaky_relu] = leaky_relu
+        m["leaky_relu"] = leaky_relu
+        m["aten.leaky_relu.default"] = leaky_relu
         gelu = self._wrap_gelu()
         m[torch.nn.functional.gelu] = gelu
         m["gelu"] = gelu
@@ -714,6 +718,22 @@ class FXGraphTranslator:
                 else node.kwargs.get("approximate", "none")
             )
             return self.ops.gelu(args[0], approximate=approximate)
+        return convert
+
+    def _wrap_leaky_relu(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            negative_slope = (
+                args[1]
+                if len(args) > 1
+                else node.kwargs.get("negative_slope", 0.01)
+            )
+            inplace = (
+                args[2] if len(args) > 2 else node.kwargs.get("inplace", False)
+            )
+            if inplace:
+                raise NotImplementedError("in-place leaky_relu is not supported")
+            return self.ops.leaky_relu(args[0], negative_slope=negative_slope)
         return convert
 
     def _wrap_reduction(self, op_func):

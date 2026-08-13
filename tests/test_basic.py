@@ -917,6 +917,24 @@ def test_zeros_like_maps_to_torch_full_semantics():
     assert "%torch.full_op" in def_to_string(result)
 
 
+def test_leaky_relu_maps_all_parameters_to_mimir():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.leaky_relu(
+                x, negative_slope=0.2, inplace=False
+            )
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4]
+    ir = def_to_string(result)
+    assert "%tensor.map_reduce" in ir
+    assert "%math.arith.mul" in ir
+    assert "1045220557:(%math.F" in ir
+
+
 def test_convolution_2d_with_bias_translates_to_conv_and_add():
     class Model(torch.nn.Module):
         def forward(self, x, weight, bias):
