@@ -3297,28 +3297,16 @@ class OperatorLibrary:
             raise ValueError("cat dimension is out of range")
         out_dims = self.rules.concat_shape(input_dims_list, dim)
 
-        physical_axes = [
-            axis for axis, extent in enumerate(input_dims_list[0])
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if dim not in physical_axes:
-            raise NotImplementedError(
-                "cat along a folded singleton axis is not implemented"
-            )
-        physical_dim = physical_axes.index(dim)
-        physical_shapes = [
-            self._physical_dims(input_dims) for input_dims in input_dims_list
-        ]
-        physical_rank = self._lit_nat(len(physical_shapes[0]))
+        rank = self._lit_nat(logical_rank)
         input_shapes = [
-            self.world.tuple(input_dims) for input_dims in physical_shapes
+            self.world.tuple(input_dims) for input_dims in input_dims_list
         ]
         callee = self.world.annex(torch_dialect.shape.cat.value)
         callee = self._apply_grouped(
-            callee, [elem_t, self._lit_nat(num_inputs), physical_rank]
+            callee, [elem_t, self._lit_nat(num_inputs), rank]
         )
         callee = self.world.app(
-            callee, self.world.lit(self.world.type_idx(physical_rank), physical_dim)
+            callee, self.world.lit(self.world.type_idx(rank), dim)
         )
         callee = self.world.app(callee, self.world.tuple(input_shapes))
         result = self.world.app(callee, self.world.tuple(tensors))

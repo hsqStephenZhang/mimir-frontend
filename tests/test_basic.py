@@ -1587,6 +1587,19 @@ def test_single_input_cat_is_identity():
     assert result == x
 
 
+def test_cat_accepts_folded_singleton_concat_extent():
+    class Model(torch.nn.Module):
+        def forward(self, first, rest):
+            return torch.cat((first.unsqueeze(1), rest), dim=1)
+
+    world = make_world()
+    first, rest = make_static_inputs_with_shapes(world, [(8,), (8, 7)])
+    result = translate_model(Model(), [first, rest])
+
+    assert tensor_shape_values(result) == [8, 8]
+    assert "%torch.shape.cat" in def_to_string(result)
+
+
 def test_avg_pool2d_translates_to_torch_pool_with_full_parameters():
     class Model(torch.nn.Module):
         def forward(self, x):
