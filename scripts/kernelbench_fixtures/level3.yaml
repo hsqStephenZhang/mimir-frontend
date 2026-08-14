@@ -1,0 +1,19 @@
+# Structural image dimensions are part of LeNet's flatten contract, so this
+# fixture reduces only the batch size and opts out of generic extent scaling.
+- kernel: level3/4_LeNet5.py
+  scalable: false
+  init_args: [20]
+  input_shapes: [8x1x32x32]
+  initializations: [rnd]
+
+- kernel: level3/8_ResNetBasicBlock.py
+  scalable: false
+  init_args: [3, 8, 1]
+  input_shapes: [2x3x32x32]
+  initializations: [rnd]
+
+- kernel: level3/17_SqueezeNetFireModule.py
+  scalable: false
+  init_args: [3, 6, 16, 16]
+  input_shapes: [2x3x32x32]
+  initializations: [rnd]

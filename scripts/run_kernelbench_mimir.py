@@ -22,6 +22,7 @@ from mimir_frontend.backend import mimir_backend
 
 
 DEFAULT_LIGHTHOUSE = Path("/workspaces/ml-compiler/lighthouse")
+DEFAULT_FIXTURES = Path(__file__).resolve().parent / "kernelbench_fixtures"
 RESULT_PREFIX = "MIMIR_KERNELBENCH_RESULT="
 
 
@@ -107,15 +108,19 @@ def numeric_kernel_key(path: Path) -> tuple[int, str]:
     return (int(prefix) if prefix.isdigit() else sys.maxsize, path.name)
 
 
-def discover_cases(lighthouse: Path, levels: tuple[str, ...]) -> list[dict[str, Any]]:
+def discover_cases(
+    lighthouse: Path,
+    levels: tuple[str, ...],
+    fixtures: Path = DEFAULT_FIXTURES,
+) -> list[dict[str, Any]]:
     """Merge maintained YAML fixtures with the authoritative source corpus."""
     yaml_cases: dict[str, dict[str, Any]] = {}
     examples = lighthouse / "examples/KernelBench"
     for level in levels:
-        yaml_path = examples / f"{level}.yaml"
-        if yaml_path.exists():
-            for case in yaml.safe_load(yaml_path.read_text()) or []:
-                yaml_cases[case["kernel"]] = {**case, "fixture": "yaml"}
+        for yaml_path in (examples / f"{level}.yaml", fixtures / f"{level}.yaml"):
+            if yaml_path.exists():
+                for case in yaml.safe_load(yaml_path.read_text()) or []:
+                    yaml_cases[case["kernel"]] = {**case, "fixture": "yaml"}
 
     corpus = lighthouse / "third_party/KernelBench/KernelBench"
     cases: list[dict[str, Any]] = []
@@ -156,11 +161,12 @@ def prepare_case(
             model = module.Model(*module.get_init_inputs()).eval()
             inputs = list(module.get_inputs())
         else:
+            fixture_divisor = size_divisor if case.get("scalable", True) else 1
             model = module.Model(
-                *parse_init_args(case.get("init_args"), module, size_divisor)
+                *parse_init_args(case.get("init_args"), module, fixture_divisor)
             ).eval()
             inputs = [
-                make_input(parse_shape(shape, size_divisor), initialization)
+                make_input(parse_shape(shape, fixture_divisor), initialization)
                 for shape, initialization in zip(
                     case["input_shapes"], case["initializations"], strict=True
                 )
@@ -243,6 +249,7 @@ def write_results(path: Path, results: list[CaseResult]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lighthouse", type=Path, default=DEFAULT_LIGHTHOUSE)
+    parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument(
         "--suite",
         default="ci",
@@ -267,7 +274,12 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--size-divisor", type=int, default=16)
-    parser.add_argument("--max-fp-iters", type=int, default=32)
+    parser.add_argument(
+        "--max-fp-iters",
+        type=int,
+        default=128,
+        help="cap MimIR fixed-point iterations; use 0 for the compiler default",
+    )
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args()
 
@@ -288,7 +300,7 @@ def main() -> int:
             if args.suite == "full"
             else (args.suite,)
         )
-        cases = discover_cases(args.lighthouse, levels)
+        cases = discover_cases(args.lighthouse, levels, args.fixtures)
     if args.kernel:
         cases = [case for case in cases if args.kernel in case["kernel"]]
     if args.case:
@@ -328,6 +340,7 @@ def main() -> int:
             command = [
                 sys.executable, str(Path(__file__).resolve()),
                 "--lighthouse", str(args.lighthouse), "--suite", args.suite,
+                "--fixtures", str(args.fixtures),
                 "--case", name, "--size-divisor", str(args.size_divisor),
                 "--max-fp-iters", str(args.max_fp_iters), "--direct",
             ]
