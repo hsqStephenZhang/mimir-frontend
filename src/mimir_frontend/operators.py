@@ -15,6 +15,11 @@ from .shape_rules import ShapeRules
 from . import expr
 
 class OperatorLibrary:
+    @staticmethod
+    def _torch_annex_id(name: str) -> int:
+        family, member = name.split(".", 1)
+        return getattr(getattr(torch_dialect, family), member).value
+
     def _lit_nat(self, value):
         return self.world.lit_nat(value)
 
@@ -276,12 +281,12 @@ class OperatorLibrary:
         """Emit a Torch dialect binary op after frontend broadcasting."""
         if isinstance(rhs, (int, float)) or isinstance(lhs, (int, float)):
             scalar_ops = {
-                "add_op": self.f32_add_axm, "sub_op": self.f32_sub_axm,
-                "mul_op": self.f32_mul_axm, "div_op": self.f32_div_axm,
-                "maximum_op": self.f32_max_axm, "minimum_op": self.f32_min_axm,
-                "eq_op": self.f32_eq_axm, "ne_op": self.f32_ne_axm,
-                "lt_op": self.f32_lt_axm, "le_op": self.f32_le_axm,
-                "gt_op": self.f32_gt_axm, "ge_op": self.f32_ge_axm,
+                "binary.add": self.f32_add_axm, "binary.sub": self.f32_sub_axm,
+                "binary.mul": self.f32_mul_axm, "binary.div": self.f32_div_axm,
+                "binary.maximum": self.f32_max_axm, "binary.minimum": self.f32_min_axm,
+                "comparison.eq": self.f32_eq_axm, "comparison.ne": self.f32_ne_axm,
+                "comparison.lt": self.f32_lt_axm, "comparison.le": self.f32_le_axm,
+                "comparison.gt": self.f32_gt_axm, "comparison.ge": self.f32_ge_axm,
             }
             return self.binary(scalar_ops[name], lhs, rhs, out_type=out_type)
         lhs_dims = self.shape_of(lhs)
@@ -303,19 +308,19 @@ class OperatorLibrary:
         elem_type = self._tensor_element_type(lhs)
         if elem_type == self.I64:
             i64_comparisons = {
-                "eq_op": "eq_i64_op", "ne_op": "ne_i64_op",
-                "lt_op": "lt_i64_op", "le_op": "le_i64_op",
-                "gt_op": "gt_i64_op", "ge_op": "ge_i64_op",
+                "comparison.eq": "comparison.eq_i64", "comparison.ne": "comparison.ne_i64",
+                "comparison.lt": "comparison.lt_i64", "comparison.le": "comparison.le_i64",
+                "comparison.gt": "comparison.gt_i64", "comparison.ge": "comparison.ge_i64",
             }
             if name not in i64_comparisons:
                 raise NotImplementedError(f"{name} is not implemented for int64 tensors")
             callee = self.world.annex(
-                getattr(torch_dialect, i64_comparisons[name]).value
+                self._torch_annex_id(i64_comparisons[name])
             )
             callee = self._apply_grouped(callee, [rank, shape])
             result = self.world.app(callee, self.world.tuple([lhs, rhs]))
             return self._remember_shape(result, output_dims)
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.annex(self._torch_annex_id(name))
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(callee, [rank, shape])
         operands = [lhs, rhs]
@@ -330,7 +335,7 @@ class OperatorLibrary:
         physical_dims = self._physical_dims(dims)
         rank = self._lit_nat(len(physical_dims))
         shape = self.world.tuple(physical_dims)
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.annex(self._torch_annex_id(name))
         callee = self.world.app(
             callee, self._torch_semantics(input, floating=floating)
         )
@@ -343,16 +348,20 @@ class OperatorLibrary:
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(input)
         if elem_type == self.I64:
-            if name not in ("add_scalar_op", "sub_scalar_op", "ne_scalar_op"):
+            if name not in (
+                "binary.add_scalar",
+                "binary.sub_scalar",
+                "comparison.ne_i64_scalar",
+            ):
                 raise NotImplementedError(
                     f"{name} is not implemented for int64 tensors"
                 )
             name = {
-                "add_scalar_op": "add_i64_scalar_op",
-                "sub_scalar_op": "sub_i64_scalar_op",
-                "ne_scalar_op": "ne_i64_scalar_op",
+                "binary.add_scalar": "binary.add_i64_scalar",
+                "binary.sub_scalar": "binary.sub_i64_scalar",
+                "comparison.ne_i64_scalar": "comparison.ne_i64_scalar",
             }[name]
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.annex(self._torch_annex_id(name))
         if elem_type != self.I64:
             callee = self.world.app(
                 callee, self._torch_semantics(input, floating=floating)
@@ -383,7 +392,7 @@ class OperatorLibrary:
         dims = self.shape_of(tensor_value)
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(tensor_value)
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.annex(self._torch_annex_id(name))
         callee = self.world.app(callee, self._torch_semantics(tensor_value))
         callee = self._apply_grouped(
             callee,
@@ -438,7 +447,7 @@ class OperatorLibrary:
             )
         elem_type = elem_types[0]
         if elem_type not in (self.F32, self.F64):
-            if name == "addcdiv_op":
+            if name == "binary.addcdiv":
                 raise TypeError("addcdiv does not support integer inputs")
             raise NotImplementedError(f"{name} dtype {elem_type} is not implemented")
 
@@ -455,7 +464,7 @@ class OperatorLibrary:
             metadata.extend([self.world.tuple(physical_dims), axis_map])
         metadata.append(self.world.tuple(output_physical_dims))
 
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        callee = self.world.annex(self._torch_annex_id(name))
         callee = self.world.app(callee, self._torch_semantics(self_tensor))
         callee = self._apply_grouped(
             callee, [*ranks, self._lit_nat(len(output_physical_dims))]
@@ -530,59 +539,59 @@ class OperatorLibrary:
     # Arithmetic
     def add(self, lhs, rhs, *, alpha=1):
         if isinstance(rhs, (int, float)):
-            return self._torch_scalar("add_scalar_op", lhs, rhs, alpha=alpha)
+            return self._torch_scalar("binary.add_scalar", lhs, rhs, alpha=alpha)
         if isinstance(lhs, (int, float)):
             return self._torch_scalar_lhs(
-                "add_scalar_lhs_op", lhs, rhs, alpha=alpha
+                "binary.add_scalar_lhs", lhs, rhs, alpha=alpha
             )
-        return self._torch_binary("add_op", lhs, rhs, alpha=alpha)
+        return self._torch_binary("binary.add", lhs, rhs, alpha=alpha)
     def sub(self, lhs, rhs, *, alpha=1):
         if isinstance(rhs, (int, float)):
-            return self._torch_scalar("sub_scalar_op", lhs, rhs, alpha=alpha)
+            return self._torch_scalar("binary.sub_scalar", lhs, rhs, alpha=alpha)
         if isinstance(lhs, (int, float)):
             return self._torch_scalar_lhs(
-                "sub_scalar_lhs_op", lhs, rhs, alpha=alpha
+                "binary.sub_scalar_lhs", lhs, rhs, alpha=alpha
             )
-        return self._torch_binary("sub_op", lhs, rhs, alpha=alpha)
+        return self._torch_binary("binary.sub", lhs, rhs, alpha=alpha)
     def addcmul(self, self_tensor, tensor1, tensor2, *, value=1):
         return self._torch_addc(
-            "addcmul_op", self_tensor, tensor1, tensor2, value=value
+            "binary.addcmul", self_tensor, tensor1, tensor2, value=value
         )
     def addcdiv(self, self_tensor, tensor1, tensor2, *, value=1):
         return self._torch_addc(
-            "addcdiv_op", self_tensor, tensor1, tensor2, value=value
+            "binary.addcdiv", self_tensor, tensor1, tensor2, value=value
         )
     def mul(self, lhs, rhs):
         if isinstance(rhs, (int, float)):
-            return self._torch_scalar("mul_scalar_op", lhs, rhs)
+            return self._torch_scalar("binary.mul_scalar", lhs, rhs)
         if isinstance(lhs, (int, float)):
-            return self._torch_scalar("mul_scalar_op", rhs, lhs)
-        return self._torch_binary("mul_op", lhs, rhs)
-    def div(self, lhs, rhs): return self._torch_binary("div_op", lhs, rhs)
+            return self._torch_scalar("binary.mul_scalar", rhs, lhs)
+        return self._torch_binary("binary.mul", lhs, rhs)
+    def div(self, lhs, rhs): return self._torch_binary("binary.div", lhs, rhs)
     def pow(self, lhs, rhs):
         if isinstance(rhs, (int, float)):
             return self._torch_scalar(
-                "pow_tensor_scalar_op", lhs, rhs, floating=True
+                "binary.pow_tensor_scalar", lhs, rhs, floating=True
             )
         return self.binary(self.f32_pow_axm, lhs, rhs)
     
     # Comparison
-    def eq(self, lhs, rhs): return self._torch_binary("eq_op", lhs, rhs, out_type=self.Bool)
+    def eq(self, lhs, rhs): return self._torch_binary("comparison.eq", lhs, rhs, out_type=self.Bool)
     def ne(self, lhs, rhs):
         if (
             isinstance(rhs, (int, float))
             and self._tensor_element_type(lhs) == self.I64
         ):
-            return self._torch_scalar("ne_scalar_op", lhs, rhs)
-        return self._torch_binary("ne_op", lhs, rhs, out_type=self.Bool)
-    def lt(self, lhs, rhs): return self._torch_binary("lt_op", lhs, rhs, out_type=self.Bool)
-    def le(self, lhs, rhs): return self._torch_binary("le_op", lhs, rhs, out_type=self.Bool)
-    def gt(self, lhs, rhs): return self._torch_binary("gt_op", lhs, rhs, out_type=self.Bool)
-    def ge(self, lhs, rhs): return self._torch_binary("ge_op", lhs, rhs, out_type=self.Bool)
+            return self._torch_scalar("comparison.ne_i64_scalar", lhs, rhs)
+        return self._torch_binary("comparison.ne", lhs, rhs, out_type=self.Bool)
+    def lt(self, lhs, rhs): return self._torch_binary("comparison.lt", lhs, rhs, out_type=self.Bool)
+    def le(self, lhs, rhs): return self._torch_binary("comparison.le", lhs, rhs, out_type=self.Bool)
+    def gt(self, lhs, rhs): return self._torch_binary("comparison.gt", lhs, rhs, out_type=self.Bool)
+    def ge(self, lhs, rhs): return self._torch_binary("comparison.ge", lhs, rhs, out_type=self.Bool)
 
     # Extrema
-    def maximum(self, lhs, rhs): return self._torch_binary("maximum_op", lhs, rhs)
-    def minimum(self, lhs, rhs): return self._torch_binary("minimum_op", lhs, rhs)
+    def maximum(self, lhs, rhs): return self._torch_binary("binary.maximum", lhs, rhs)
+    def minimum(self, lhs, rhs): return self._torch_binary("binary.minimum", lhs, rhs)
 
     def _clamp_scalar_bounds(self, x, min_val, max_val):
         dims = self.shape_of(x)
@@ -599,7 +608,7 @@ class OperatorLibrary:
                 self._float_lit(elem_type, value),
             )
 
-        callee = self.world.annex(torch_dialect.clamp_op.value)
+        callee = self.world.annex(torch_dialect.activation.clamp.value)
         callee = self.world.app(callee, self._torch_semantics(x))
         callee = self._apply_grouped(
             callee,
@@ -639,23 +648,23 @@ class OperatorLibrary:
         return res
 
     # Unary
-    def exp(self, x): return self._torch_unary("exp_op", x, floating=True)
-    def log(self, x): return self._torch_unary("log_op", x, floating=True)
-    def tanh(self, x): return self._torch_unary("tanh_op", x, floating=True)
-    def sqrt(self, x): return self._torch_unary("sqrt_op", x, floating=True)
-    def sin(self, x): return self._torch_unary("sin_op", x, floating=True)
-    def cos(self, x): return self._torch_unary("cos_op", x, floating=True)
-    def abs(self, x): return self._torch_unary("abs_op", x)
-    def neg(self, x): return self._torch_unary("neg_op", x)
-    def sigmoid(self, x): return self._torch_unary("sigmoid_op", x, floating=True)
-    def silu(self, x): return self._torch_unary("silu_op", x, floating=True)
+    def exp(self, x): return self._torch_unary("unary.exp", x, floating=True)
+    def log(self, x): return self._torch_unary("unary.log", x, floating=True)
+    def tanh(self, x): return self._torch_unary("activation.tanh", x, floating=True)
+    def sqrt(self, x): return self._torch_unary("unary.sqrt", x, floating=True)
+    def sin(self, x): return self._torch_unary("unary.sin", x, floating=True)
+    def cos(self, x): return self._torch_unary("unary.cos", x, floating=True)
+    def abs(self, x): return self._torch_unary("unary.abs", x)
+    def neg(self, x): return self._torch_unary("unary.neg", x)
+    def sigmoid(self, x): return self._torch_unary("activation.sigmoid", x, floating=True)
+    def silu(self, x): return self._torch_unary("activation.silu", x, floating=True)
     def gelu(self, x, *, approximate="none"):
         """Map PyTorch GELU's string mode to a PE-visible Torch dialect flag."""
         if approximate not in ("none", "tanh"):
             raise ValueError(f"unsupported GELU approximation mode: {approximate!r}")
         dims = self.shape_of(x)
         physical_dims = self._physical_dims(dims)
-        callee = self.world.annex(torch_dialect.gelu_op.value)
+        callee = self.world.annex(torch_dialect.activation.gelu.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -666,16 +675,16 @@ class OperatorLibrary:
             self.world.tuple([self.world.lit_bool(approximate == "tanh"), x]),
         )
         return self._remember_shape(result, dims)
-    def rsqrt(self, x): return self._torch_unary("rsqrt_op", x, floating=True)
+    def rsqrt(self, x): return self._torch_unary("unary.rsqrt", x, floating=True)
     
     def relu(self, x):
-        return self._torch_unary("relu_op", x)
+        return self._torch_unary("activation.relu", x)
 
     def leaky_relu(self, x, *, negative_slope=0.01):
         dims = self.shape_of(x)
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(x)
-        callee = self.world.annex(torch_dialect.leaky_relu_op.value)
+        callee = self.world.annex(torch_dialect.activation.leaky_relu.value)
         callee = self.world.app(
             callee, self._torch_semantics(x, floating=True)
         )
@@ -695,7 +704,7 @@ class OperatorLibrary:
         dims = self.shape_of(x)
         physical_dims = self._physical_dims(dims)
         elem_type = self._tensor_element_type(x)
-        callee = self.world.annex(torch_dialect.threshold_op.value)
+        callee = self.world.annex(torch_dialect.activation.threshold.value)
         callee = self.world.app(callee, self._torch_semantics(x))
         callee = self._apply_grouped(
             callee,
@@ -716,7 +725,7 @@ class OperatorLibrary:
             self.f32_div_axm,
             lambda v: [self._f32_float_lit(1.0), v],
         )
-        return self._torch_unary("reciprocal_op", x, floating=True)
+        return self._torch_unary("unary.reciprocal", x, floating=True)
 
     def bitwise_and(self, lhs, rhs):
         return self.binary(self.bool_and_axm, lhs, rhs, out_type=self.Bool)
@@ -808,7 +817,7 @@ class OperatorLibrary:
         rank = self._lit_nat(len(output_dims))
         shape = self.world.tuple(output_dims)
         elem_type = self._tensor_element_type(x)
-        callee = self.world.annex(torch_dialect.where_op.value)
+        callee = self.world.annex(torch_dialect.pointwise.where_.value)
         callee = self._apply_grouped(callee, [elem_type, rank, shape])
         result = self.world.app(callee, self.world.tuple([cond, x, y]))
         return self._remember_shape(result, output_dims)
@@ -871,7 +880,7 @@ class OperatorLibrary:
         elem_type = self._tensor_element_type(input)
 
         # A scalar tensor has no index tuple.  Keep the established tensor
-        # map path for this case; `%torch.expand_op` requires an array input.
+        # map path for this case; `%torch.shape.expand` requires an array input.
         if in_rank_val == 0:
             if input.type() == elem_type:
                 scalar = input
@@ -883,7 +892,7 @@ class OperatorLibrary:
                 scalar = self.world.app(
                     getter, self.world.tuple([input, self.world.tuple([])])
                 )
-            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(callee, [elem_type, out_rank])
             result = self.world.app(callee, [out_shape_tuple, scalar])
             return self._remember_shape(result, shape)
@@ -901,7 +910,7 @@ class OperatorLibrary:
                 f"output={len(shape)}, offset={logical_rank_offset}"
             )
         index_tuple = self.world.tuple([self.world.lit(idx_t, i) for i in mapped_axes])
-        callee = self.world.annex(torch_dialect.expand_op.value)
+        callee = self.world.annex(torch_dialect.shape.expand.value)
         callee = self._apply_grouped(callee, [elem_type, in_rank, out_rank])
         callee = self.world.app(callee, [in_shape_tuple, out_shape_tuple])
         result = self.world.app(callee, [input, index_tuple])
@@ -965,7 +974,7 @@ class OperatorLibrary:
         out_shape_tuple, out_rank_val = self._extract_shape(shape)
         if out_rank_val == 0:
             return self._remember_shape(scalar_def, [])
-        callee = self.world.annex(torch_dialect.full_op.value)
+        callee = self.world.annex(torch_dialect.creation.full.value)
         callee = self._apply_grouped(callee, [elem_type, self._lit_nat(out_rank_val)])
         callee = self.world.app(callee, [out_shape_tuple, scalar_def])
         return self._remember_shape(callee, shape)
@@ -1015,7 +1024,7 @@ class OperatorLibrary:
 
         shape_tuple, rank_value = self._extract_shape(shape)
         stride_tuple, _ = self._extract_shape(stride)
-        callee = self.world.annex(torch_dialect.empty_strided_op.value)
+        callee = self.world.annex(torch_dialect.creation.empty_strided.value)
         callee = self._apply_grouped(callee, [self.F32, self._lit_nat(rank_value)])
         result = self.world.app(callee, self.world.tuple([shape_tuple, stride_tuple]))
         return self._remember_shape(result, list(shape))
@@ -1029,7 +1038,7 @@ class OperatorLibrary:
             scalar = self.world.lit_tt() if value else self.world.lit_ff()
         else:
             raise NotImplementedError("fill.Scalar currently supports float32 and bool tensors")
-        callee = self.world.annex(torch_dialect.fill_scalar_op.value)
+        callee = self.world.annex(torch_dialect.creation.fill_scalar.value)
         callee = self._apply_grouped(
             callee, [elem_type, self._lit_nat(len(dims)), self.world.tuple(dims)]
         )
@@ -1053,7 +1062,7 @@ class OperatorLibrary:
             raise NotImplementedError("arange pin_memory=True is not implemented")
 
         size = len(range(start, end, step))
-        callee = self.world.annex(torch_dialect.arange_i64_op.value)
+        callee = self.world.annex(torch_dialect.creation.arange_i64.value)
         callee = self.world.app(callee, self._lit_nat(size))
         result = self.world.app(
             callee,
@@ -1144,7 +1153,7 @@ class OperatorLibrary:
         reduced_dims = dims[:canonical] + dims[canonical + 1:]
 
         if 0 <= canonical < rank and canonical not in physical_axes:
-            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(
                 callee, [self.I64, self._lit_nat(len(physical_dims))]
             )
@@ -1166,9 +1175,9 @@ class OperatorLibrary:
             else len(physical_dims)
         )
         callee = self.world.annex(
-            torch_dialect.max_dim_op.value
+            torch_dialect.reduction.max_dim.value
             if kind == "max"
-            else torch_dialect.min_dim_op.value
+            else torch_dialect.reduction.min_dim.value
         )
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
@@ -1206,7 +1215,7 @@ class OperatorLibrary:
         # one and log_softmax is zero, so PE can eliminate the full operator.
         if valid_logical_dim and canonical_dim not in physical_axes:
             elem_type = self._tensor_element_type(input)
-            callee = self.world.annex(torch_dialect.full_op.value)
+            callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(
                 callee, [elem_type, self._lit_nat(len(physical_dims))]
             )
@@ -1245,11 +1254,11 @@ class OperatorLibrary:
 
     def softmax(self, input, dim=-1):
         """Emit API-level softmax; stabilization and reduction live in MimIR."""
-        return self._softmax(input, dim, torch_dialect.softmax_op, 1.0)
+        return self._softmax(input, dim, torch_dialect.normalization.softmax, 1.0)
 
     def log_softmax(self, input, dim=-1):
         """Emit API-level log_softmax; stabilization and reduction live in MimIR."""
-        return self._softmax(input, dim, torch_dialect.log_softmax_op, 0.0)
+        return self._softmax(input, dim, torch_dialect.normalization.log_softmax, 0.0)
 
     def flip(self, input, dims):
         """Map logical Torch axes to the singleton-folded physical tensor rank."""
@@ -1280,7 +1289,7 @@ class OperatorLibrary:
             physical_dims = [len(physical_shape)] * max(1, len(dims))
 
         elem_type = self._tensor_element_type(input)
-        callee = self.world.annex(torch_dialect.flip_op.value)
+        callee = self.world.annex(torch_dialect.indexing.flip.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -1315,7 +1324,7 @@ class OperatorLibrary:
             physical_dim = len(physical_shape)
 
         elem_type = self._tensor_element_type(input)
-        callee = self.world.annex(torch_dialect.narrow_op.value)
+        callee = self.world.annex(torch_dialect.indexing.narrow.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -1370,16 +1379,16 @@ class OperatorLibrary:
 
     def triu(self, input, diagonal=0):
         return self._triangular(
-            input, diagonal, torch_dialect.triu_op, "triu"
+            input, diagonal, torch_dialect.linalg.triu, "triu"
         )
 
     def tril(self, input, diagonal=0):
         return self._triangular(
-            input, diagonal, torch_dialect.tril_op, "tril"
+            input, diagonal, torch_dialect.linalg.tril, "tril"
         )
 
     def native_layer_norm(self, input, normalized_shape, weight=None, bias=None, eps=1e-5):
-        """Map functional/ATen LayerNorm to `%torch.native_layer_norm_op`."""
+        """Map functional/ATen LayerNorm to `%torch.normalization.native_layer_norm`."""
         input_dims = self.shape_of(input)
         normalized_shape = tuple(int(d) for d in normalized_shape)
         rn = len(normalized_shape)
@@ -1410,7 +1419,7 @@ class OperatorLibrary:
                 self.world.annex(option.some.value), value
             )
 
-        callee = self.world.annex(torch_dialect.native_layer_norm_op.value)
+        callee = self.world.annex(torch_dialect.normalization.native_layer_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee, [self._lit_nat(rb), self._lit_nat(rn)]
@@ -1443,7 +1452,7 @@ class OperatorLibrary:
             isinstance(dim, (tuple, list)) and len(dim) == 0
         )
         if reduce_all and kind == "sum" and not keepdim:
-            callee = self.world.annex(torch_dialect.sum_all_op.value)
+            callee = self.world.annex(torch_dialect.reduction.sum_all.value)
             callee = self.world.app(callee, self._torch_semantics(input))
             callee = self._apply_grouped(
                 callee,
@@ -1484,7 +1493,9 @@ class OperatorLibrary:
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
         if len(dim_values) == 1 and not keepdim:
-            callee = self.world.annex(getattr(torch_dialect, f"{kind}_dim_op").value)
+            callee = self.world.annex(
+                self._torch_annex_id(f"reduction.{kind}_dim")
+            )
             dictionary = self._torch_semantics(
                 input, floating=kind in ("amax", "mean")
             )
@@ -1494,14 +1505,14 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, output_dims)
         if kind == "sum" and len(dim_values) == 1 and keepdim:
-            callee = self.world.annex(torch_dialect.sum_dim_keepdim_op.value)
+            callee = self.world.annex(torch_dialect.reduction.sum_dim_keepdim.value)
             callee = self.world.app(callee, self._torch_semantics(input))
             callee = self._apply_grouped(callee, [self._lit_nat(rank), shape])
             callee = self.world.app(callee, dim_values[0])
             result = self.world.app(callee, input)
             return self._remember_shape(result, output_dims)
         if kind == "mean" and len(dim_values) == 1 and keepdim:
-            callee = self.world.annex(torch_dialect.mean_dim_keepdim_op.value)
+            callee = self.world.annex(torch_dialect.reduction.mean_dim_keepdim.value)
             callee = self.world.app(
                 callee, self._torch_semantics(input, floating=True)
             )
@@ -1512,13 +1523,13 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, output_dims)
         name = (
-            f"{kind}_dims_keepdim_op"
+            f"reduction.{kind}_dims_keepdim"
             if keepdim
-            else f"{kind}_dims_op"
+            else f"reduction.{kind}_dims"
         )
         if keepdim and kind == "amax":
-            name = "amax_dims_op"
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+            name = "reduction.amax_dims"
+        callee = self.world.annex(self._torch_annex_id(name))
         dictionary = self._torch_semantics(
             input, floating=kind in ("amax", "mean")
         )
@@ -1663,7 +1674,7 @@ class OperatorLibrary:
         dim_values = [
             self.world.lit_i64(axis) for axis in physical_reduction_dims
         ]
-        callee = self.world.annex(torch_dialect.var_mean_dims_op.value)
+        callee = self.world.annex(torch_dialect.reduction.var_mean_dims.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -1713,14 +1724,14 @@ class OperatorLibrary:
         if not self.rules._same_dim(lhs_dims[-1], rhs_dims[-2]):
             raise ValueError("aten.mm contracting dimensions must match")
 
-        callee = self.world.annex(torch_dialect.mm_op.value)
+        callee = self.world.annex(torch_dialect.linalg.mm.value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(callee, [lhs_dims[0], lhs_dims[1], rhs_dims[1]])
         result = self.world.app(callee, self.world.tuple([lhs, rhs]))
         return self._remember_shape(result, [lhs_dims[0], rhs_dims[1]])
 
     def addmm(self, self_tensor, mat1, mat2, *, beta=1, alpha=1):
-        """Map the complete `aten.addmm` contract to `%torch.addmm_op`."""
+        """Map the complete `aten.addmm` contract to `%torch.linalg.addmm`."""
         self_dims = self.shape_of(self_tensor)
         mat1_dims = self.shape_of(mat1)
         mat2_dims = self.shape_of(mat2)
@@ -1747,7 +1758,7 @@ class OperatorLibrary:
 
         m, k, n = mat1_dims[0], mat1_dims[1], mat2_dims[1]
         elem_type = self._tensor_element_type(mat1)
-        callee = self.world.annex(torch_dialect.addmm_op.value)
+        callee = self.world.annex(torch_dialect.linalg.addmm.value)
         callee = self.world.app(callee, self._torch_semantics(mat1))
         callee = self._apply_grouped(
             callee, [self._lit_nat(len(physical_self_dims)), m, k, n]
@@ -1770,7 +1781,7 @@ class OperatorLibrary:
         """Map `aten.matmul`; rank dispatch and broadcasting live in MimIR."""
         lhs_dims = self._physical_dims(self.shape_of(lhs))
         rhs_dims = self._physical_dims(self.shape_of(rhs))
-        callee = self.world.annex(torch_dialect.matmul_op.value)
+        callee = self.world.annex(torch_dialect.linalg.matmul.value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(
             callee,
@@ -1797,7 +1808,7 @@ class OperatorLibrary:
         if not self.rules._same_dim(contract, rhs_contract):
             raise ValueError("aten.bmm contracting dimensions must match")
 
-        callee = self.world.annex(torch_dialect.bmm_op.value)
+        callee = self.world.annex(torch_dialect.linalg.bmm.value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(callee, [batch, rows, contract, cols])
         result = self.world.app(callee, self.world.tuple([lhs, rhs]))
@@ -1816,7 +1827,7 @@ class OperatorLibrary:
 
         batch_dims = input_dims[:-1]
         elem_t = self._tensor_element_type(input)
-        callee = self.world.annex(torch_dialect.linear_op.value)
+        callee = self.world.annex(torch_dialect.linalg.linear.value)
         callee = self.world.app(callee, self._torch_semantics(input))
         callee = self._apply_grouped(
             callee, [self._lit_nat(len(batch_dims)), in_features, out_features]
@@ -1862,9 +1873,9 @@ class OperatorLibrary:
         elem_t = self._tensor_element_type(input)
 
         axiom = {
-            "rnn": torch_dialect.rnn_direction_op,
-            "gru": torch_dialect.gru_direction_op,
-            "lstm": torch_dialect.lstm_direction_op,
+            "rnn": torch_dialect.recurrent.rnn_direction,
+            "gru": torch_dialect.recurrent.gru_direction,
+            "lstm": torch_dialect.recurrent.lstm_direction,
         }[kind]
         callee = self.world.annex(axiom.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -2058,7 +2069,7 @@ class OperatorLibrary:
                     f"batch_norm {name} must have shape [channels]"
                 )
 
-        callee = self.world.annex(torch_dialect.batch_norm_inference_op.value)
+        callee = self.world.annex(torch_dialect.normalization.batch_norm_inference.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
@@ -2126,7 +2137,7 @@ class OperatorLibrary:
         out_spatial = self._conv2d_spatial_shape((h, w), (kh, kw), stride, dilation, padding)
         out_dims = [n, cout, out_spatial[0], out_spatial[1]]
 
-        callee = self.world.annex(torch_dialect.convolution_op.value)
+        callee = self.world.annex(torch_dialect.conv.general.value)
         callee = self.world.app(callee, self._torch_semantics(x))
         callee = self._apply_grouped(
             callee, [n, cin, cout, cin_per_group, h, w, kh, kw]
@@ -2171,7 +2182,7 @@ class OperatorLibrary:
         out_length = self._conv2d_dim(length, kernel, stride, dilation, padding)
         out_dims = [n, cout, out_length]
 
-        callee = self.world.annex(torch_dialect.convolution1d_op.value)
+        callee = self.world.annex(torch_dialect.conv.conv1d.value)
         callee = self.world.app(callee, self._torch_semantics(x))
         callee = self._apply_grouped(
             callee, [n, cin, cout, cin_per_group, length, kernel]
@@ -2326,7 +2337,7 @@ class OperatorLibrary:
             self._pool2d_dim(h, kernel[0], stride[0], dilation[0], padding[0], ceil_mode),
             self._pool2d_dim(w, kernel[1], stride[1], dilation[1], padding[1], ceil_mode),
         ]
-        callee = self.world.annex(torch_dialect.max_pool2d_op.value)
+        callee = self.world.annex(torch_dialect.pool.max_pool2d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, h, w])
         callee = self._apply_grouped(
@@ -2359,7 +2370,7 @@ class OperatorLibrary:
         output_length = self._pool2d_dim(
             length, kernel, stride, dilation, padding, ceil_mode
         )
-        callee = self.world.annex(torch_dialect.max_pool1d_op.value)
+        callee = self.world.annex(torch_dialect.pool.max_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, length])
         callee = self.world.app(
@@ -2392,7 +2403,7 @@ class OperatorLibrary:
                              padding[i], ceil_mode)
             for i in range(3)
         ]
-        callee = self.world.annex(torch_dialect.max_pool3d_op.value)
+        callee = self.world.annex(torch_dialect.pool.max_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, depth, height, width])
         params = [
@@ -2418,7 +2429,7 @@ class OperatorLibrary:
     def hardtanh(self, x, min_val=-1.0, max_val=1.0):
         dims = self.shape_of(x)
         physical_dims = self._physical_dims(dims)
-        callee = self.world.annex(torch_dialect.hardtanh_op.value)
+        callee = self.world.annex(torch_dialect.activation.hardtanh.value)
         callee = self.world.app(callee, self._torch_semantics(x))
         callee = self._apply_grouped(
             callee, [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)]
@@ -2457,7 +2468,7 @@ class OperatorLibrary:
             self._pool2d_dim(w, kernel[1], stride[1], 1, padding[1], ceil_mode),
         ]
 
-        callee = self.world.annex(torch_dialect.avg_pool2d_op.value)
+        callee = self.world.annex(torch_dialect.pool.avg_pool2d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, h, w])
         if divisor_override is None:
@@ -2499,7 +2510,7 @@ class OperatorLibrary:
         output_length = self._pool2d_dim(
             length, kernel, stride, 1, padding, ceil_mode
         )
-        callee = self.world.annex(torch_dialect.avg_pool1d_op.value)
+        callee = self.world.annex(torch_dialect.pool.avg_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, length])
         divisor_override = self.world.app(
@@ -2534,7 +2545,7 @@ class OperatorLibrary:
                              padding[i], ceil_mode)
             for i in range(3)
         ]
-        callee = self.world.annex(torch_dialect.avg_pool3d_op.value)
+        callee = self.world.annex(torch_dialect.pool.avg_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, depth, height, width])
         if divisor_override is None:
@@ -2568,7 +2579,7 @@ class OperatorLibrary:
                 "adaptive_avg_pool1d currently supports output_size=1"
             )
         n, c, length = in_dims
-        callee = self.world.annex(torch_dialect.adaptive_avg_pool1d_op.value)
+        callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, length])
         result = self.world.app(callee, self._lit_nat(output_size))
@@ -2590,7 +2601,7 @@ class OperatorLibrary:
                 "adaptive_avg_pool3d currently supports output_size=(1,1,1)"
             )
         n, c, depth, height, width = in_dims
-        callee = self.world.annex(torch_dialect.adaptive_avg_pool3d_op.value)
+        callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, depth, height, width])
         result = self.world.app(
@@ -2621,7 +2632,7 @@ class OperatorLibrary:
 
         rank = self._lit_nat(len(repeats))
         in_shape_tuple = self.world.tuple(aligned_dims)
-        callee = self.world.annex(torch_dialect.repeat_op.value)
+        callee = self.world.annex(torch_dialect.shape.repeat.value)
         elem_t = self._tensor_element_type(x)
         callee = self._apply_grouped(callee, [elem_t, rank, in_shape_tuple])
         callee = self.world.app(callee, self.world.tuple(repeat_defs))
@@ -2667,7 +2678,7 @@ class OperatorLibrary:
         else:
             raise NotImplementedError(f"pad value for element type {elem_type}")
 
-        callee = self.world.annex(torch_dialect.constant_pad_op.value)
+        callee = self.world.annex(torch_dialect.creation.constant_pad.value)
         callee = self._apply_grouped(
             callee,
             [elem_type, self._lit_nat(rank), self._lit_nat(padded_rank),
@@ -2712,8 +2723,8 @@ class OperatorLibrary:
         output_dims[canonical_dim] = self._nat_binop(core.nat.sub, combined, 1)
 
         elem_type = self._tensor_element_type(input)
-        name = "diff_i64_op" if elem_type == self.I64 else "diff_op"
-        callee = self.world.annex(getattr(torch_dialect, name).value)
+        name = "scan.diff_i64" if elem_type == self.I64 else "scan.diff"
+        callee = self.world.annex(self._torch_annex_id(name))
         if elem_type != self.I64:
             callee = self.world.app(callee, self._torch_semantics(input))
         callee = self._apply_grouped(
@@ -2762,10 +2773,10 @@ class OperatorLibrary:
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_dim = physical_axes.index(canonical_dim)
         if boolean_input and len(physical_dims) == 1:
-            callee = self.world.annex(torch_dialect.cumsum_bool_i64_1d_op.value)
+            callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64_1d.value)
             callee = self.world.app(callee, physical_dims[0])
         elif boolean_input:
-            callee = self.world.annex(torch_dialect.cumsum_bool_i64_op.value)
+            callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64.value)
             callee = self._apply_grouped(
                 callee,
                 [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
@@ -2773,9 +2784,9 @@ class OperatorLibrary:
             callee = self.world.app(callee, self.world.lit_i64(physical_dim))
         else:
             op = (
-                torch_dialect.cumsum_2d_op
+                torch_dialect.scan.cumsum_2d
                 if len(physical_dims) == 2
-                else torch_dialect.cumsum_op
+                else torch_dialect.scan.cumsum
             )
             callee = self.world.annex(op.value)
             callee = self.world.app(
@@ -2803,7 +2814,7 @@ class OperatorLibrary:
         canonical_dim = dim + rank if dim < 0 else dim
         if canonical_dim < 0 or canonical_dim >= rank:
             raise ValueError(f"cumprod dim {dim} is out of range for rank {rank}")
-        callee = self.world.annex(torch_dialect.cumprod_op.value)
+        callee = self.world.annex(torch_dialect.scan.cumprod.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee, [self._lit_nat(rank), self.world.tuple(dims)]
@@ -2839,7 +2850,7 @@ class OperatorLibrary:
             extent_value = extent.get_nat()
             normalized_shifts.append(0 if extent_value == 0 else shift % extent_value)
 
-        callee = self.world.annex(torch_dialect.roll_op.value)
+        callee = self.world.annex(torch_dialect.indexing.roll.value)
         callee = self._apply_grouped(
             callee,
             [self._tensor_element_type(input), self._lit_nat(rank),
@@ -2885,7 +2896,7 @@ class OperatorLibrary:
         output_shape[canonical] = windows
         output_shape.append(self._lit_nat(size))
 
-        callee = self.world.annex(torch_dialect.unfold_op.value)
+        callee = self.world.annex(torch_dialect.indexing.unfold.value)
         callee = self._apply_grouped(
             callee,
             [self._tensor_element_type(input), self._lit_nat(rank),
@@ -2904,7 +2915,7 @@ class OperatorLibrary:
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
         dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
-        callee = self.world.annex(torch_dialect.gather_op.value)
+        callee = self.world.annex(torch_dialect.indexing.gather.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -2960,7 +2971,7 @@ class OperatorLibrary:
         if self.shape_of(columns) != output_dims:
             columns = self.expand(columns, output_dims)
 
-        callee = self.world.annex(torch_dialect.index_2d_op.value)
+        callee = self.world.annex(torch_dialect.indexing.index_2d.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -2982,7 +2993,7 @@ class OperatorLibrary:
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
         dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
-        callee = self.world.annex(torch_dialect.scatter_src_op.value)
+        callee = self.world.annex(torch_dialect.indexing.scatter_src.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -3009,7 +3020,7 @@ class OperatorLibrary:
             scalar = self.world.lit_i64(int(value))
         else:
             scalar = self._float_lit(elem_t, value)
-        callee = self.world.annex(torch_dialect.scatter_value_op.value)
+        callee = self.world.annex(torch_dialect.indexing.scatter_value.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -3035,7 +3046,7 @@ class OperatorLibrary:
             )
 
         physical_index_dims = self._physical_dims(index_dims)
-        callee = self.world.annex(torch_dialect.embedding_op.value)
+        callee = self.world.annex(torch_dialect.indexing.embedding.value)
         callee = self._apply_grouped(
             callee,
             [
@@ -3101,7 +3112,7 @@ class OperatorLibrary:
 
         expected_dims = [self._lit_nat(dim) if isinstance(dim, int) else dim for dim in size]
         rank = self._lit_nat(len(actual_dims))
-        callee = self.world.annex(torch_dialect.assert_tensor_metadata_op.value)
+        callee = self.world.annex(torch_dialect.metadata.assert_tensor_metadata.value)
         callee = self.world.app(callee, rank)
         return self.world.app(
             callee,
@@ -3132,7 +3143,7 @@ class OperatorLibrary:
         in_rank = self._lit_nat(len(in_dims))
         out_shape_tuple, out_rank_val = self._extract_shape(shape)
         out_rank = self._lit_nat(out_rank_val)
-        callee = self.world.annex(torch_dialect.reshape_op.value)
+        callee = self.world.annex(torch_dialect.shape.reshape.value)
         callee = self._apply_grouped(callee, [self._tensor_element_type(x), in_rank, out_rank])
         callee = self.world.app(callee, [self.world.tuple(in_dims), out_shape_tuple])
         result = self.world.app(callee, x)
@@ -3186,7 +3197,7 @@ class OperatorLibrary:
         starts[dim] = self._lit_nat(start) if isinstance(start, int) else start
         steps[dim] = self._lit_nat(step) if isinstance(step, int) else (self._lit_nat(1) if step is None else step)
 
-        callee = self.world.annex(torch_dialect.slice_op.value)
+        callee = self.world.annex(torch_dialect.indexing.slice.value)
         callee = self._apply_grouped(callee, [self._tensor_element_type(x), self._lit_nat(rank_val)])
         callee = self.world.app(callee, [self.world.tuple(in_dims), self.world.tuple(starts),
                                          self.world.tuple(steps), self.world.tuple(out_dims)])
@@ -3209,7 +3220,7 @@ class OperatorLibrary:
 
     def cat(self, tensors, dim=0):
         """
-        Translates to `%torch.cat_op`.
+        Translates to `%torch.shape.cat`.
 
         A one-element concatenation is the identity and is eliminated eagerly.
         """
@@ -3250,7 +3261,7 @@ class OperatorLibrary:
         input_shapes = [
             self.world.tuple(input_dims) for input_dims in physical_shapes
         ]
-        callee = self.world.annex(torch_dialect.cat_op.value)
+        callee = self.world.annex(torch_dialect.shape.cat.value)
         callee = self._apply_grouped(
             callee, [elem_t, self._lit_nat(num_inputs), physical_rank]
         )
@@ -3275,7 +3286,7 @@ class OperatorLibrary:
         idx_t = self.world.type_idx(rank_val)
         perm_mim = self.world.tuple([self.world.lit(idx_t, p) for p in permutation])
 
-        callee = self.world.annex(torch_dialect.permute_op.value)
+        callee = self.world.annex(torch_dialect.shape.permute.value)
         callee = self._apply_grouped(callee, [elem_t, rank_val, in_shape_tuple])
         result = self.world.app(callee, [x, perm_mim])
         return self._remember_shape(result, out_dims)
@@ -3305,7 +3316,7 @@ class OperatorLibrary:
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_dim0 = physical_axes.index(axis0)
         physical_dim1 = physical_axes.index(axis1)
-        callee = self.world.annex(torch_dialect.transpose_int_op.value)
+        callee = self.world.annex(torch_dialect.shape.transpose_int.value)
         callee = self._apply_grouped(
             callee,
             [self._tensor_element_type(x), self._lit_nat(len(physical_dims)),

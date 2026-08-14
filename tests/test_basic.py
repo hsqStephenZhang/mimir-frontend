@@ -183,7 +183,7 @@ def test_functional_relu_translates():
     result = translate_model(Model(), make_static_inputs_with_shapes(world, [(2, 3, 4)]))
 
     assert isinstance(result, mim.Def)
-    assert "%torch.relu_op" in def_to_string(result)
+    assert "%torch.activation.relu" in def_to_string(result)
 
 
 def test_functional_threshold_translates_to_torch_op():
@@ -194,7 +194,7 @@ def test_functional_threshold_translates_to_torch_op():
     world = make_world()
     result = translate_model(Model(), make_inputs(world, 1, "static", 2))
 
-    assert "%torch.threshold_op" in def_to_string(result)
+    assert "%torch.activation.threshold" in def_to_string(result)
 
 
 def test_shape_of_reads_symbolic_dims_from_mim_def_type():
@@ -290,7 +290,7 @@ def test_broadcast_binary_with_same_symbol_def_does_not_insert_expand():
     result = translate_model(Model(), [x, y])
 
     assert tensor_shape(result) == [n, world.lit_nat(4)]
-    assert "%torch.expand_op" not in def_to_string(result)
+    assert "%torch.shape.expand" not in def_to_string(result)
 
 
 
@@ -351,8 +351,8 @@ def test_binary_operator_all_shapes(name, torch_op, python_op):
 @pytest.mark.parametrize(
     "torch_op,alpha,expected_op,expected_literal",
     [
-        (torch.add, 3.0, "%torch.add_op", "1077936128:(%math.F (23, 8))"),
-        (torch.sub, 4.0, "%torch.sub_op", "1082130432:(%math.F (23, 8))"),
+        (torch.add, 3.0, "%torch.binary.add", "1077936128:(%math.F (23, 8))"),
+        (torch.sub, 4.0, "%torch.binary.sub", "1082130432:(%math.F (23, 8))"),
     ],
 )
 def test_add_sub_preserve_alpha_at_torch_boundary(
@@ -373,8 +373,8 @@ def test_add_sub_preserve_alpha_at_torch_boundary(
 @pytest.mark.parametrize(
     "torch_op,expected_op",
     [
-        (torch.add, "%torch.add_scalar_lhs_op"),
-        (torch.sub, "%torch.sub_scalar_lhs_op"),
+        (torch.add, "%torch.binary.add_scalar_lhs"),
+        (torch.sub, "%torch.binary.sub_scalar_lhs"),
     ],
 )
 def test_add_sub_scalar_lhs_preserve_operand_roles(torch_op, expected_op):
@@ -393,8 +393,8 @@ def test_add_sub_scalar_lhs_preserve_operand_roles(torch_op, expected_op):
 @pytest.mark.parametrize(
     "torch_op,expected_op",
     [
-        (torch.addcmul, "%torch.addcmul_op"),
-        (torch.addcdiv, "%torch.addcdiv_op"),
+        (torch.addcmul, "%torch.binary.addcmul"),
+        (torch.addcdiv, "%torch.binary.addcdiv"),
     ],
 )
 def test_addc_ops_map_directly_and_preserve_value(torch_op, expected_op):
@@ -416,7 +416,7 @@ def test_addc_ops_map_directly_and_preserve_value(torch_op, expected_op):
 
     assert expected_op in text
     assert "1075838976:(%math.F (23, 8))" in text
-    assert "%torch.expand_op" not in text
+    assert "%torch.shape.expand" not in text
 
 
 def test_addcdiv_rejects_integer_inputs():
@@ -443,7 +443,7 @@ def test_addcmul_reports_unsupported_integer_semantics():
         world, [(2, 3), (2, 3), (2, 3)], elem_type=world.type_i64()
     )
 
-    with pytest.raises(NotImplementedError, match="addcmul_op dtype.*not implemented"):
+    with pytest.raises(NotImplementedError, match="binary.addcmul dtype.*not implemented"):
         translate_model(Model(), inputs)
 
 
@@ -482,7 +482,7 @@ def test_sequence_of_elementwise_operators(shape_kind, rank):
     result = translate_model(Model(), make_inputs(world, 3, shape_kind, rank))
 
     assert isinstance(result, mim.Def)
-    assert_ir_contains_in_order(def_to_string(result), ["%torch.add_op", "%torch.mul_op", "%torch.relu_op"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.binary.add", "%torch.binary.mul", "%torch.activation.relu"])
 
 
 def test_binary_broadcast_leading_singleton_uses_common_output_shape():
@@ -495,7 +495,7 @@ def test_binary_broadcast_leading_singleton_uses_common_output_shape():
     result = translate_model(Model(), [x_input, y_input])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert_ir_contains_in_order(def_to_string(result), ["%torch.expand_op", "%torch.add_op"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.shape.expand", "%torch.binary.add"])
 
 
 def test_binary_broadcast_rejects_incompatible_static_shape():
@@ -559,7 +559,7 @@ def test_real_aten_scalar_mul_overload():
     result = translate_model(Model(), make_inputs(world, 1, "dynamic", 3))
 
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%torch.mul_scalar_op" in def_to_string(result)
+    assert "%torch.binary.mul_scalar" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dtype_name", ["F32", "F64"])
@@ -591,9 +591,9 @@ def test_addmm_maps_directly_to_torch_dialect():
 
     assert tensor_shape_values(result) == [2, 4]
     ir = def_to_string(result)
-    assert "%torch.addmm_op" in ir
-    assert "%torch.mm_op" not in ir
-    assert "%torch.add_op" not in ir
+    assert "%torch.linalg.addmm" in ir
+    assert "%torch.linalg.mm" not in ir
+    assert "%torch.binary.add" not in ir
 
 
 @pytest.mark.parametrize("self_shape", [(4,), (1, 4), (2, 1), (2, 4)])
@@ -612,7 +612,7 @@ def test_addmm_preserves_self_broadcast_mapping(self_shape):
     result = translate_model(Model(), [self_tensor, mat1, mat2])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.addmm_op" in def_to_string(result)
+    assert "%torch.linalg.addmm" in def_to_string(result)
 
 
 def test_rank4_matmul_maps_directly_to_torch_matmul():
@@ -627,7 +627,7 @@ def test_rank4_matmul_maps_directly_to_torch_matmul():
     result = translate_model(Model(), [lhs, rhs])
 
     assert tensor_shape_values(result) == [2, 16, 5, 7]
-    assert "%torch.matmul_op" in def_to_string(result)
+    assert "%torch.linalg.matmul" in def_to_string(result)
 
 
 def test_bmm_maps_directly_to_torch_bmm():
@@ -640,7 +640,7 @@ def test_bmm_maps_directly_to_torch_bmm():
     result = translate_model(Model(), [lhs, rhs])
 
     assert tensor_shape_values(result) == [2, 3, 5]
-    assert "%torch.bmm_op" in def_to_string(result)
+    assert "%torch.linalg.bmm" in def_to_string(result)
 
 
 def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
@@ -654,8 +654,8 @@ def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 3, 5, 11]
-    assert "%torch.expand_op" not in ir
-    assert "%torch.matmul_op" in ir
+    assert "%torch.shape.expand" not in ir
+    assert "%torch.linalg.matmul" in ir
 
 
 @pytest.mark.parametrize(
@@ -680,7 +680,7 @@ def test_matmul_maps_all_vector_rank_cases_to_torch_semantics(
     result = translate_model(Model(), [lhs, rhs])
 
     assert tensor_shape_values(result) == output_shape
-    assert "%torch.matmul_op" in def_to_string(result)
+    assert "%torch.linalg.matmul" in def_to_string(result)
 
 
 def test_matmul_leaves_batch_broadcast_to_torch_plugin():
@@ -696,8 +696,8 @@ def test_matmul_leaves_batch_broadcast_to_torch_plugin():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 3, 5, 11]
-    assert "%torch.matmul_op" in ir
-    assert "%torch.expand_op" not in ir
+    assert "%torch.linalg.matmul" in ir
+    assert "%torch.shape.expand" not in ir
 
 
 def test_empty_strided_then_fill_preserves_shape_and_torch_semantics():
@@ -708,8 +708,8 @@ def test_empty_strided_then_fill_preserves_shape_and_torch_semantics():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [5, 5]
-    assert "%torch.empty_strided_op" in ir
-    assert "%torch.fill_scalar_op" in ir
+    assert "%torch.creation.empty_strided" in ir
+    assert "%torch.creation.fill_scalar" in ir
 
 
 def test_arange_i64_and_float_conversion_cover_rotary_position_path():
@@ -720,7 +720,7 @@ def test_arange_i64_and_float_conversion_cover_rotary_position_path():
 
     assert tensor_shape_values(positions) == [5]
     assert tensor_element_type(positions) == ops.I64
-    assert "%torch.arange_i64_op" in def_to_string(positions)
+    assert "%torch.creation.arange_i64" in def_to_string(positions)
     assert tensor_element_type(positions_f32) == ops.F32
     assert "%tensor.unary" in def_to_string(positions_f32)
 
@@ -735,7 +735,7 @@ def test_qwen_exact_transpose_int_overload_is_registered():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4, 3]
-    assert "%torch.transpose_int_op" in def_to_string(result)
+    assert "%torch.shape.transpose_int" in def_to_string(result)
 
 
 def test_qwen_exact_unsafe_view_overload_is_registered():
@@ -748,7 +748,7 @@ def test_qwen_exact_unsafe_view_overload_is_registered():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [6, 4]
-    assert "%torch.reshape_op" in def_to_string(result)
+    assert "%torch.shape.reshape" in def_to_string(result)
 
 
 def test_qwen_exact_silu_overload_is_registered():
@@ -761,7 +761,7 @@ def test_qwen_exact_silu_overload_is_registered():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.silu_op" in def_to_string(result)
+    assert "%torch.activation.silu" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dtype", [None, torch.float32])
@@ -776,7 +776,7 @@ def test_qwen_exact_softmax_int_overload_is_registered(dtype):
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.softmax_op" in ir
+    assert "%torch.normalization.softmax" in ir
 
 
 @pytest.mark.parametrize("dim", [1, 2, -1, 3])
@@ -794,7 +794,7 @@ def test_softmax_maps_logical_axes_across_folded_singletons(dim):
     result = translator.translate(traced.graph, [x])
 
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 1, 4]
-    expected_op = "%torch.full_op" if dim == 1 else "%torch.softmax_op"
+    expected_op = "%torch.creation.full" if dim == 1 else "%torch.normalization.softmax"
     assert expected_op in def_to_string(result)
 
 
@@ -828,7 +828,7 @@ def test_qwen_exact_triu_overload_is_registered():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [5, 5]
-    assert "%torch.triu_op" in def_to_string(result)
+    assert "%torch.linalg.triu" in def_to_string(result)
 
 
 def test_tensor_T_maps_to_matrix_transpose():
@@ -841,7 +841,7 @@ def test_tensor_T_maps_to_matrix_transpose():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [5, 3]
-    assert "%torch.permute_op" in def_to_string(result)
+    assert "%torch.shape.permute" in def_to_string(result)
 
 
 def test_exact_tril_overload_maps_to_torch_semantics():
@@ -854,15 +854,15 @@ def test_exact_tril_overload_maps_to_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [5, 5]
-    assert "%torch.tril_op" in def_to_string(result)
+    assert "%torch.linalg.tril" in def_to_string(result)
 
 
 @pytest.mark.parametrize(
     ("model", "expected_shape", "expected_op"),
     [
-        (lambda: torch.nn.LogSoftmax(dim=1), [2, 4], "%torch.log_softmax_op"),
-        (lambda: _FlipDimension(1), [2, 4], "%torch.flip_op"),
-        (lambda: _NarrowDimension(1, 1, 2), [2, 2], "%torch.narrow_op"),
+        (lambda: torch.nn.LogSoftmax(dim=1), [2, 4], "%torch.normalization.log_softmax"),
+        (lambda: _FlipDimension(1), [2, 4], "%torch.indexing.flip"),
+        (lambda: _NarrowDimension(1, 1, 2), [2, 2], "%torch.indexing.narrow"),
     ],
 )
 def test_lighthouse_sequence_helpers_map_to_torch_semantics(
@@ -886,7 +886,7 @@ def test_floating_cumsum_maps_to_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.cumsum_2d_op" in def_to_string(result)
+    assert "%torch.scan.cumsum_2d" in def_to_string(result)
 
 
 def test_tensor_select_method_maps_to_torch_semantics():
@@ -900,8 +900,8 @@ def test_tensor_select_method_maps_to_torch_semantics():
 
     assert tensor_shape_values(result) == [2]
     ir = def_to_string(result)
-    assert "%torch.slice_op" in ir
-    assert "%torch.reshape_op" in ir
+    assert "%torch.indexing.slice" in ir
+    assert "%torch.shape.reshape" in ir
 
 
 def test_zeros_like_maps_to_torch_full_semantics():
@@ -914,7 +914,7 @@ def test_zeros_like_maps_to_torch_full_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.full_op" in def_to_string(result)
+    assert "%torch.creation.full" in def_to_string(result)
 
 
 def test_leaky_relu_maps_all_parameters_to_mimir():
@@ -955,7 +955,7 @@ def test_convolution_2d_with_bias_translates_to_conv_and_add():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert "%torch.convolution_op" in def_to_string(result)
+    assert "%torch.conv.general" in def_to_string(result)
 
 
 def test_functional_conv2d_translates_to_convolution():
@@ -968,7 +968,7 @@ def test_functional_conv2d_translates_to_convolution():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert "%torch.convolution_op" in def_to_string(result)
+    assert "%torch.conv.general" in def_to_string(result)
 
 
 def test_functional_depthwise_conv2d_translates_to_grouped_convolution():
@@ -986,7 +986,7 @@ def test_functional_depthwise_conv2d_translates_to_grouped_convolution():
     result = translator.translate(traced.graph, [x, weight])
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert "%torch.convolution_op" in def_to_string(result)
+    assert "%torch.conv.general" in def_to_string(result)
 
 
 def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
@@ -1002,7 +1002,7 @@ def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
     ir = def_to_string(result)
 
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1]
-    assert "%torch.mean_dims_keepdim_op" in ir
+    assert "%torch.reduction.mean_dims_keepdim" in ir
 
 
 def test_adaptive_avg_pool2d_folded_singletons_is_identity():
@@ -1042,7 +1042,7 @@ def test_functional_batch_norm_inference_translates():
 
     assert tensor_shape_values(result) == [4, 8, 8]
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 8, 8]
-    assert "%torch.batch_norm_inference_op" in def_to_string(result)
+    assert "%torch.normalization.batch_norm_inference" in def_to_string(result)
 
 
 def test_aten_batch_norm_inference_translates():
@@ -1060,7 +1060,7 @@ def test_aten_batch_norm_inference_translates():
     result = translate_model(Model(), inputs)
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert "%torch.batch_norm_inference_op" in def_to_string(result)
+    assert "%torch.normalization.batch_norm_inference" in def_to_string(result)
 
 
 def test_inplace_residual_add_and_relu_translate_as_values():
@@ -1077,7 +1077,7 @@ def test_inplace_residual_add_and_relu_translate_as_values():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert_ir_contains_in_order(ir, ["%torch.relu_op", "%torch.add_op"])
+    assert_ir_contains_in_order(ir, ["%torch.activation.relu", "%torch.binary.add"])
 
 
 def test_convolution_batch_one_result_can_feed_next_convolution():
@@ -1121,7 +1121,7 @@ def test_convolution_batch_one_result_can_feed_next_convolution():
     assert tensor_shape_values(result) == [5, 8, 8]
     assert_ir_contains_in_order(
         def_to_string(result),
-        ["%torch.convolution_op", "%torch.relu_op", "%torch.convolution_op"],
+        ["%torch.conv.general", "%torch.activation.relu", "%torch.conv.general"],
     )
 
 
@@ -1138,7 +1138,7 @@ def test_index_tensor_translates_to_gather_dim0():
     result = translate_model(Model(), [x, index])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.embedding_op" in def_to_string(result)
+    assert "%torch.indexing.embedding" in def_to_string(result)
 
 
 def test_aten_gather_translates_to_torch_gather():
@@ -1154,7 +1154,7 @@ def test_aten_gather_translates_to_torch_gather():
     result = translate_model(Model(), [x, index])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.gather_op" in def_to_string(result)
+    assert "%torch.indexing.gather" in def_to_string(result)
 
 
 def test_embedding_translates_to_dim0_gather():
@@ -1172,7 +1172,7 @@ def test_embedding_translates_to_dim0_gather():
     result = translate_model(Model(), [weight, index])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.embedding_op" in def_to_string(result)
+    assert "%torch.indexing.embedding" in def_to_string(result)
 
 
 def test_conv1d_translates_to_torch_convolution1d():
@@ -1188,7 +1188,7 @@ def test_conv1d_translates_to_torch_convolution1d():
     result = translate_model(Model(), [x, weight, bias])
 
     assert tensor_shape_values(result) == [2, 8, 8]
-    assert "%torch.convolution1d_op" in def_to_string(result)
+    assert "%torch.conv.conv1d" in def_to_string(result)
 
 
 def test_gelu_translates_approximation_mode_to_static_flag():
@@ -1203,7 +1203,7 @@ def test_gelu_translates_approximation_mode_to_static_flag():
     text = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.gelu_op" in text
+    assert "%torch.activation.gelu" in text
     assert "tt" in text
 
 
@@ -1218,7 +1218,7 @@ def test_tensor_permute_variadic_method_translates():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4, 3]
-    assert "%torch.permute_op" in def_to_string(result)
+    assert "%torch.shape.permute" in def_to_string(result)
 
 
 def test_tensor_repeat_uses_counts_and_left_rank_alignment():
@@ -1232,7 +1232,7 @@ def test_tensor_repeat_uses_counts_and_left_rank_alignment():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4, 15]
-    assert "%torch.repeat_op" in def_to_string(result)
+    assert "%torch.shape.repeat" in def_to_string(result)
 
 
 def test_constant_pad_uses_pytorch_reverse_axis_order():
@@ -1245,7 +1245,7 @@ def test_constant_pad_uses_pytorch_reverse_axis_order():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 12, 10]
-    assert "%torch.constant_pad_op" in def_to_string(result)
+    assert "%torch.creation.constant_pad" in def_to_string(result)
 
 
 def test_getitem_tensor_index_translates_to_dim0_index():
@@ -1263,7 +1263,7 @@ def test_getitem_tensor_index_translates_to_dim0_index():
     result = translate_model(Model(), [weight, index])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.embedding_op" in def_to_string(result)
+    assert "%torch.indexing.embedding" in def_to_string(result)
 
 
 def test_diff_with_prepend_translates_to_torch_semantics():
@@ -1277,7 +1277,7 @@ def test_diff_with_prepend_translates_to_torch_semantics():
     result = translate_model(Model(), [x, prepend])
 
     assert tensor_shape_values(result) == [2, 5]
-    assert "%torch.diff_op" in def_to_string(result)
+    assert "%torch.scan.diff" in def_to_string(result)
 
 
 def test_bool_cumsum_translates_to_i64_torch_semantics():
@@ -1292,7 +1292,7 @@ def test_bool_cumsum_translates_to_i64_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.cumsum_bool_i64_op" in def_to_string(result)
+    assert "%torch.scan.cumsum_bool_i64" in def_to_string(result)
 
 
 def test_cumprod_translates_to_torch_semantics():
@@ -1305,7 +1305,7 @@ def test_cumprod_translates_to_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.cumprod_op" in def_to_string(result)
+    assert "%torch.scan.cumprod" in def_to_string(result)
 
 
 def test_roll_translates_static_shifts_and_repeated_dims():
@@ -1318,7 +1318,7 @@ def test_roll_translates_static_shifts_and_repeated_dims():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.roll_op" in def_to_string(result)
+    assert "%torch.indexing.roll" in def_to_string(result)
 
 
 def test_unfold_captures_vit_patch_shape():
@@ -1331,7 +1331,7 @@ def test_unfold_captures_vit_patch_shape():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 2, 8, 4]
-    assert "%torch.unfold_op" in def_to_string(result)
+    assert "%torch.indexing.unfold" in def_to_string(result)
 
 
 def test_new_ones_inherits_or_overrides_dtype():
@@ -1345,7 +1345,7 @@ def test_new_ones_inherits_or_overrides_dtype():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.full_op" in def_to_string(result)
+    assert "%torch.creation.full" in def_to_string(result)
 
 
 def test_two_tensor_advanced_index_translates_to_checked_index_2d():
@@ -1363,7 +1363,7 @@ def test_two_tensor_advanced_index_translates_to_checked_index_2d():
     result = translate_model(Model(), [x, rows, columns])
 
     assert tensor_shape_values(result) == [2, 5]
-    assert "%torch.index_2d_op" in def_to_string(result)
+    assert "%torch.indexing.index_2d" in def_to_string(result)
 
 
 def test_scalar_torch_tensor_constant_is_canonicalized():
@@ -1389,7 +1389,7 @@ def test_scatter_src_translates_to_torch_scatter_src():
     result = translate_model(Model(), [x, index, src])
 
     assert tensor_shape_values(result) == [4, 3]
-    assert "%torch.scatter_src_op" in def_to_string(result)
+    assert "%torch.indexing.scatter_src" in def_to_string(result)
 
 
 def test_scatter_value_translates_to_torch_scatter_value():
@@ -1405,7 +1405,7 @@ def test_scatter_value_translates_to_torch_scatter_value():
     result = translate_model(Model(), [x, index])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.scatter_value_op" in def_to_string(result)
+    assert "%torch.indexing.scatter_value" in def_to_string(result)
 
 
 def test_alias_returns_the_same_ssa_value():
@@ -1444,7 +1444,7 @@ def test_ones_default_translates_to_torch_full():
     result = FXGraphTranslator(world).translate(graph, [x])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.full_op" in def_to_string(result)
+    assert "%torch.creation.full" in def_to_string(result)
 
 
 def test_assert_tensor_metadata_emits_shape_guard():
@@ -1472,7 +1472,7 @@ def test_assert_tensor_metadata_emits_shape_guard():
         if node.op == "call_function" and "_assert_tensor_metadata" in str(node.target)
     ]
     assert len(guards) == 1
-    assert "%torch.assert_tensor_metadata_op" in def_to_string(guards[0])
+    assert "%torch.metadata.assert_tensor_metadata" in def_to_string(guards[0])
 
 
 def test_max_pool2d_translates_to_torch_pool():
@@ -1485,7 +1485,7 @@ def test_max_pool2d_translates_to_torch_pool():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4, 4]
-    assert "%torch.max_pool2d_op" in def_to_string(result)
+    assert "%torch.pool.max_pool2d" in def_to_string(result)
 
 
 def test_max_pool2d_ceil_mode_shape():
@@ -1500,7 +1500,7 @@ def test_max_pool2d_ceil_mode_shape():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 7, 7]
-    assert "%torch.max_pool2d_op" in def_to_string(result)
+    assert "%torch.pool.max_pool2d" in def_to_string(result)
 
 
 def test_max_pool1d_reuses_torch_pool_semantics():
@@ -1513,7 +1513,7 @@ def test_max_pool1d_reuses_torch_pool_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.max_pool1d_op" in def_to_string(result)
+    assert "%torch.pool.max_pool1d" in def_to_string(result)
 
 
 def test_hardtanh_translates_to_torch_op():
@@ -1526,7 +1526,7 @@ def test_hardtanh_translates_to_torch_op():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.hardtanh_op" in def_to_string(result)
+    assert "%torch.activation.hardtanh" in def_to_string(result)
 
 
 def test_single_input_cat_is_identity():
@@ -1553,7 +1553,7 @@ def test_avg_pool2d_translates_to_torch_pool_with_full_parameters():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 3, 3]
-    assert "%torch.avg_pool2d_op" in def_to_string(result)
+    assert "%torch.pool.avg_pool2d" in def_to_string(result)
 
 
 def test_avg_pool1d_reuses_torch_pool_semantics():
@@ -1566,7 +1566,7 @@ def test_avg_pool1d_reuses_torch_pool_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 5]
-    assert "%torch.avg_pool1d_op" in def_to_string(result)
+    assert "%torch.pool.avg_pool1d" in def_to_string(result)
 
 
 def test_adaptive_avg_pool1d_uses_torch_semantics():
@@ -1579,7 +1579,7 @@ def test_adaptive_avg_pool1d_uses_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.adaptive_avg_pool1d_op" in def_to_string(result)
+    assert "%torch.pool.adaptive_avg_pool1d" in def_to_string(result)
 
 
 def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
@@ -1594,7 +1594,7 @@ def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
     # Literal-one nested array axes normalize away in the physical MimIR type;
     # the frontend shape cache and FX output metadata preserve logical NC111.
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.adaptive_avg_pool3d_op" in def_to_string(result)
+    assert "%torch.pool.adaptive_avg_pool3d" in def_to_string(result)
 
 
 def test_max_pool3d_preserves_full_parameter_semantics():
@@ -1609,7 +1609,7 @@ def test_max_pool3d_preserves_full_parameter_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 3, 4, 5]
-    assert "%torch.max_pool3d_op" in def_to_string(result)
+    assert "%torch.pool.max_pool3d" in def_to_string(result)
 
 
 def test_avg_pool3d_preserves_boundary_divisor_parameters():
@@ -1624,7 +1624,7 @@ def test_avg_pool3d_preserves_boundary_divisor_parameters():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3, 3, 4, 5]
-    assert "%torch.avg_pool3d_op" in def_to_string(result)
+    assert "%torch.pool.avg_pool3d" in def_to_string(result)
 
 
 def test_lenet_style_cnn_with_pooling_translates():
@@ -1655,13 +1655,13 @@ def test_lenet_style_cnn_with_pooling_translates():
     assert_ir_contains_in_order(
         def_to_string(result),
         [
-            "%torch.convolution_op",
-            "%torch.relu_op",
-            "%torch.max_pool2d_op",
-            "%torch.convolution_op",
+            "%torch.conv.general",
+            "%torch.activation.relu",
+            "%torch.pool.max_pool2d",
+            "%torch.conv.general",
             "%tensor.pool",
-            "%torch.reshape_op",
-            "%torch.addmm_op",
+            "%torch.shape.reshape",
+            "%torch.linalg.addmm",
         ],
     )
 
@@ -1669,11 +1669,11 @@ def test_lenet_style_cnn_with_pooling_translates():
 @pytest.mark.parametrize(
     "dim,keepdim,expected_shape,expected_op",
     [
-        (None, False, [], "%torch.sum_all_op"),
-        (0, False, [3, 4], "%torch.sum_dim_op"),
-        (1, True, [2, 1, 4], "%torch.sum_dim_keepdim_op"),
-        ((1, 2), False, [2], "%torch.sum_dims_op"),
-        ((1, 2), True, [2, 1, 1], "%torch.sum_dims_keepdim_op"),
+        (None, False, [], "%torch.reduction.sum_all"),
+        (0, False, [3, 4], "%torch.reduction.sum_dim"),
+        (1, True, [2, 1, 4], "%torch.reduction.sum_dim_keepdim"),
+        ((1, 2), False, [2], "%torch.reduction.sum_dims"),
+        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum_dims_keepdim"),
     ],
 )
 def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape, expected_op):
@@ -1710,7 +1710,7 @@ def test_sum_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.sum_all_op" in def_to_string(result)
+    assert "%torch.reduction.sum_all" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dim", [[], ()])
@@ -1727,7 +1727,7 @@ def test_mean_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.mean_dims_op" in def_to_string(result)
+    assert "%torch.reduction.mean_dims" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dim", [[], ()])
@@ -1744,7 +1744,7 @@ def test_amax_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.amax_dims_op" in def_to_string(result)
+    assert "%torch.reduction.amax_dims" in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -1830,7 +1830,7 @@ def test_where_operator(shape_kind, rank):
     result = translate_model(Model(), [cond_input, x_input, y_input])
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == ops.F32
-    assert "%torch.where_op" in def_to_string(result)
+    assert "%torch.pointwise.where_" in def_to_string(result)
 
 
 def test_where_broadcasts_scalar_branch_to_condition_shape():
@@ -1847,7 +1847,7 @@ def test_where_broadcasts_scalar_branch_to_condition_shape():
     result = translate_model(Model(), [cond, scalar, y])
 
     assert tensor_shape_values(result) == [2, 3, 4]
-    assert "%torch.where_op" in def_to_string(result)
+    assert "%torch.pointwise.where_" in def_to_string(result)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])
@@ -1860,7 +1860,7 @@ def test_clamp_scalar_bound(shape_kind, rank):
     result = translate_model(Model(), make_inputs(world, 1, shape_kind, rank))
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%torch.clamp_op" in def_to_string(result)
+    assert "%torch.activation.clamp" in def_to_string(result)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])
@@ -1890,7 +1890,7 @@ def test_dim_extrema_map_to_structured_torch_result(kind):
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
     assert f"%torch.{kind}_dim_op" in ir
-    assert "%torch.slice_op" not in ir
+    assert "%torch.indexing.slice" not in ir
 
 
 @pytest.mark.parametrize("kind", ["max", "min"])
@@ -1906,7 +1906,7 @@ def test_dim_extrema_folded_singleton_axis_is_static(kind):
 
     assert [dim.get_nat() for dim in ops.shape_of(values)] == [2, 3]
     assert [dim.get_nat() for dim in ops.shape_of(indices)] == [2, 3]
-    assert "%torch.full_op" in def_to_string(indices)
+    assert "%torch.creation.full" in def_to_string(indices)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank,dim,keepdim", [(3, -1, True), (3, (1, 2), True)])
@@ -1922,9 +1922,9 @@ def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     assert all(isinstance(value, mim.Def) for value in result)
     # var_mean returns a tuple of (var, mean)
     ir = "\n".join(def_to_string(value) for value in result)
-    assert "%torch.var_mean_dims_op" in ir
+    assert "%torch.reduction.var_mean_dims" in ir
     if keepdim:
-        assert "%torch.reshape_op" in ir
+        assert "%torch.shape.reshape" in ir
 
 
 @pytest.mark.parametrize("correction", [-1, 4, 5, 0.5])
@@ -1941,7 +1941,7 @@ def test_var_mean_accepts_scalar_correction(correction):
     assert isinstance(result, tuple)
     assert len(result) == 2
     assert all(isinstance(value, mim.Def) for value in result)
-    assert "%torch.var_mean_dims_op" in def_to_string(result[0])
+    assert "%torch.reduction.var_mean_dims" in def_to_string(result[0])
 
 
 def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
@@ -1955,8 +1955,8 @@ def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
 
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.var_mean_dims_op" in ir
-    assert "%torch.slice_op" not in ir
+    assert "%torch.reduction.var_mean_dims" in ir
+    assert "%torch.indexing.slice" not in ir
 
 
 @pytest.mark.parametrize("unbiased", [False, True])
@@ -1973,8 +1973,8 @@ def test_var_mean_dim_overload_maps_unbiased_to_correction(unbiased):
 
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.var_mean_dims_op" in ir
-    assert "%torch.reshape_op" in ir
+    assert "%torch.reduction.var_mean_dims" in ir
+    assert "%torch.shape.reshape" in ir
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -2086,7 +2086,7 @@ def test_expand_negative_one_keeps_input_dimension():
     assert [
         dim.get_nat() for dim in translator.ops.shape_of(result)
     ] == [5, 32]
-    assert "%torch.expand_op" in def_to_string(result)
+    assert "%torch.shape.expand" in def_to_string(result)
 
 
 def test_split_tensor_overload_returns_tuple_of_slices():
@@ -2100,7 +2100,7 @@ def test_split_tensor_overload_returns_tuple_of_slices():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [3, 2]
-    assert_ir_contains_in_order(def_to_string(result), ["%torch.slice_op", "%torch.slice_op", "%torch.add_op"])
+    assert_ir_contains_in_order(def_to_string(result), ["%torch.indexing.slice", "%torch.indexing.slice", "%torch.binary.add"])
 
 def test_reshape_operator():
     class Model(torch.nn.Module):
@@ -2112,7 +2112,7 @@ def test_reshape_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert_ir_contains_in_order(ir, ["%torch.reshape_op"])
+    assert_ir_contains_in_order(ir, ["%torch.shape.reshape"])
 
 
 def test_view_infers_negative_one_dimension():
@@ -2125,7 +2125,7 @@ def test_view_infers_negative_one_dimension():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [8, 400]
-    assert "%torch.reshape_op" in def_to_string(result)
+    assert "%torch.shape.reshape" in def_to_string(result)
 
 
 def test_torch_flatten_translates_to_reshape():
@@ -2138,7 +2138,7 @@ def test_torch_flatten_translates_to_reshape():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 60]
-    assert "%torch.reshape_op" in def_to_string(result)
+    assert "%torch.shape.reshape" in def_to_string(result)
 
 
 def test_dropout_zero_probability_is_identity():
@@ -2163,7 +2163,7 @@ def test_slice_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert_ir_contains_in_order(ir, ["%torch.slice_op"])
+    assert_ir_contains_in_order(ir, ["%torch.indexing.slice"])
 
 def test_cat_operator():
     class Model(torch.nn.Module):
@@ -2175,7 +2175,7 @@ def test_cat_operator():
     result = translate_model(Model(), [x_input, y_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.cat_op" in ir
+    assert "%torch.shape.cat" in ir
 
 def test_squeeze_unsqueeze_operator():
     class Model(torch.nn.Module):
@@ -2188,7 +2188,7 @@ def test_squeeze_unsqueeze_operator():
     result = translate_model(Model(), [x_input])
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.reshape_op" in ir
+    assert "%torch.shape.reshape" in ir
 
 def test_select_operator():
     class Model(torch.nn.Module):
@@ -2202,7 +2202,7 @@ def test_select_operator():
     # select is implemented as slice + squeeze(reshape)
     # Note: MimIR may normalize singleton dimensions away, making squeeze a no-op type-wise.
     ir = def_to_string(result)
-    assert "%torch.slice_op" in ir
+    assert "%torch.indexing.slice" in ir
 
 def test_clone_copy_operator():
     class Model(torch.nn.Module):
