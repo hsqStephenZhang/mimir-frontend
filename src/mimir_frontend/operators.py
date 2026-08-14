@@ -822,6 +822,58 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple([cond, x, y]))
         return self._remember_shape(result, output_dims)
 
+    def masked_fill_scalar(self, input, mask, value):
+        input_dims = self.shape_of(input)
+        mask_dims = self.shape_of(mask)
+        physical_input_dims = self._physical_dims(input_dims)
+        physical_mask_dims = self._physical_dims(mask_dims)
+        rank = len(physical_input_dims)
+        mask_rank = len(physical_mask_dims)
+        if mask_rank > rank:
+            raise ValueError("masked_fill mask rank exceeds input rank")
+
+        elem_type = self._tensor_element_type(input)
+        if isinstance(value, mim.Def):
+            scalar = value
+        elif elem_type in (self.F32, self.F64):
+            scalar = self._float_lit(elem_type, value)
+        elif elem_type == self.I64:
+            scalar = self.world.lit_i64(int(value))
+        elif elem_type == self.Bool:
+            scalar = self.world.lit_tt() if value else self.world.lit_ff()
+        else:
+            raise NotImplementedError(
+                f"masked_fill scalar for element type {elem_type}"
+            )
+
+        rank_def = self._lit_nat(rank)
+        mask_rank_def = self._lit_nat(mask_rank)
+        idx_t = self.world.type_idx(rank_def)
+        mask_to_input = self.world.tuple(
+            [
+                self.world.lit(idx_t, rank - mask_rank + axis)
+                for axis in range(mask_rank)
+            ]
+        )
+        callee = self.world.annex(
+            self._torch_annex_id("pointwise.masked_fill_scalar")
+        )
+        callee = self._apply_grouped(
+            callee, [elem_type, mask_rank_def, rank_def]
+        )
+        callee = self._apply_grouped(
+            callee,
+            [
+                self.world.tuple(physical_mask_dims),
+                self.world.tuple(physical_input_dims),
+                mask_to_input,
+            ],
+        )
+        result = self.world.app(
+            callee, self.world.tuple([input, mask, scalar])
+        )
+        return self._remember_shape(result, input_dims)
+
         tensor_type = self._tensor_element_type(x)
         rank = self._lit_nat(len(output_dims))
         shape = self.world.tuple(output_dims)
@@ -3421,7 +3473,7 @@ class OperatorLibrary:
                 slices.append(part)
                 curr = end
         
-        return self.world.tuple(slices)
+        return tuple(slices)
         
     def select(self, x, dim, index):
         """

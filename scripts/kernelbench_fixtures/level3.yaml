@@ -23,3 +23,15 @@
   init_args: [16, 4]
   input_shapes: [2x16x8x8]
   initializations: [rnd]
+
+- kernel: level3/43_MinGPTCausalAttention.py
+  scalable: false
+  init_args: [16, 4, 0.0, 0.0, 16]
+  input_shapes: [2x16x16]
+  initializations: [rnd]
+
+- kernel: level3/50_ReLUSelfAttention.py
+  scalable: false
+  init_args: [16, 4, 16]
+  input_shapes: [2x16x16]
+  initializations: [rnd]

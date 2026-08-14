@@ -860,6 +860,23 @@ def test_tensor_T_maps_to_matrix_transpose():
     assert "%torch.shape.permute" in def_to_string(result)
 
 
+def test_masked_fill_scalar_maps_to_torch_semantics_with_broadcast_mask():
+    class Model(torch.nn.Module):
+        def forward(self, x, mask):
+            return x.masked_fill(mask, float("-inf"))
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 4, 8, 8)])[0]
+    mask = make_static_inputs_with_shapes(
+        world, [(8, 8)], elem_type=ops.Bool
+    )[0]
+    result = translate_model(Model(), [x, mask])
+
+    assert tensor_shape_values(result) == [2, 4, 8, 8]
+    assert "%torch.pointwise.masked_fill_scalar" in def_to_string(result)
+
+
 def test_exact_aten_t_overload_maps_to_matrix_transpose():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -2130,6 +2147,18 @@ def test_split_tensor_overload_returns_tuple_of_slices():
 
     assert tensor_shape_values(result) == [3, 2]
     assert_ir_contains_in_order(def_to_string(result), ["%torch.indexing.slice", "%torch.indexing.slice", "%torch.binary.add"])
+
+
+def test_split_keeps_structured_results_outside_mimir_ir():
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 6, 4)])[0]
+
+    parts = ops.split(x, 2, dim=1)
+
+    assert isinstance(parts, tuple)
+    assert len(parts) == 3
+    assert all(isinstance(part, mim.Def) for part in parts)
 
 def test_reshape_operator():
     class Model(torch.nn.Module):

@@ -359,6 +359,8 @@ class FXGraphTranslator:
         # Selection
         m[torch.where] = self._wrap_where()
         m["aten.where.self"] = self._wrap_where()
+        m["masked_fill"] = self._wrap_masked_fill_scalar()
+        m["aten.masked_fill.Scalar"] = self._wrap_masked_fill_scalar()
         m[torch.triu] = self._wrap_triu()
         m["aten.triu.default"] = self._wrap_triu()
         m[torch.tril] = self._wrap_tril()
@@ -900,6 +902,12 @@ class FXGraphTranslator:
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             return self.ops.where(args[0], args[1], args[2])
+        return convert
+
+    def _wrap_masked_fill_scalar(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.masked_fill_scalar(args[0], args[1], args[2])
         return convert
 
     def _wrap_t(self):
