@@ -1341,6 +1341,28 @@ def test_bool_cumsum_translates_to_i64_torch_semantics():
     assert "%torch.scan.cumsum_bool_i64" in def_to_string(result)
 
 
+def test_all_dim_keepdim_maps_to_torch_boolean_reduction():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.all.dim(x, -1, True)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(
+        world, [(2, 4, 8, 8)], elem_type=ops.Bool
+    )[0]
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(traced.graph, [x])
+
+    assert [
+        dim.get_nat() for dim in translator.ops.shape_of(result)
+    ] == [2, 4, 8, 1]
+    ir = def_to_string(result)
+    assert "%torch.reduction.all_dims" in ir
+    assert "%torch.shape.reshape" in ir
+
+
 def test_cumprod_translates_to_torch_semantics():
     class Model(torch.nn.Module):
         def forward(self, x):

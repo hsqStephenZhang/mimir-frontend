@@ -70,3 +70,25 @@ def test_mimir_policy_retraces_python_multihead_attention_to_aten():
 
     assert torch.nn.functional.multi_head_attention_forward not in targets
     assert torch.ops.aten.bmm.default in targets
+
+
+def test_mimir_policy_decomposes_cpu_scaled_dot_product_attention():
+    def attention(query, key, value):
+        return torch.nn.functional.scaled_dot_product_attention(query, key, value)
+
+    inputs = [torch.randn(2, 4, 8, 16) for _ in range(3)]
+    gm = torch.fx.symbolic_trace(attention)
+
+    lowered = apply_decomposition_policy(
+        gm, inputs, MIMIR_DECOMPOSITION_POLICY
+    )
+    targets = _targets(lowered)
+
+    assert torch.nn.functional.scaled_dot_product_attention not in targets
+    assert (
+        torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default
+        not in targets
+    )
+    assert torch.ops.aten._safe_softmax.default not in targets
+    assert torch.ops.aten.bmm.default in targets
+    assert torch.ops.aten._softmax.default in targets

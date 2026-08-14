@@ -241,6 +241,8 @@ class FXGraphTranslator:
         m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
+        m["aten.all.dim"] = self._wrap_bool_reduction(reduce_all=True)
+        m["aten.any.dim"] = self._wrap_bool_reduction(reduce_all=False)
         # https://pytorch.org/docs/stable/generated/torch.var_mean.html
         # Public/correction schema: (Tensor, dim?, *, correction?, keepdim)
         m[torch.var_mean] = self._wrap_var_mean_correction()
@@ -902,6 +904,17 @@ class FXGraphTranslator:
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
             return self.ops.where(args[0], args[1], args[2])
+        return convert
+
+    def _wrap_bool_reduction(self, *, reduce_all):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            dim = args[1] if len(args) > 1 else kwargs.get("dim")
+            keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+            return self.ops.bool_reduce_dims(
+                args[0], dim, keepdim=keepdim, reduce_all=reduce_all
+            )
         return convert
 
     def _wrap_masked_fill_scalar(self):

@@ -822,6 +822,34 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple([cond, x, y]))
         return self._remember_shape(result, output_dims)
 
+    def bool_reduce_dims(self, input, dim, *, keepdim=False, reduce_all=False):
+        input_dims = self.shape_of(input)
+        dims = self.rules.normalize_reduce_dims(dim, len(input_dims))
+        callee = self.world.annex(
+            torch_dialect.reduction.all_dims.value
+            if reduce_all
+            else torch_dialect.reduction.any_dims.value
+        )
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._lit_nat(len(input_dims)),
+                self._lit_nat(len(dims)),
+                self.world.tuple(input_dims),
+            ],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([self.world.lit_i64(axis) for axis in dims]),
+        )
+        result = self.world.app(callee, input)
+        reduced_dims = self.rules.reduce_shape(input_dims, dims, False)
+        self._remember_shape(result, reduced_dims)
+        if keepdim:
+            kept_dims = self.rules.reduce_shape(input_dims, dims, True)
+            return self.reshape(result, kept_dims)
+        return result
+
     def masked_fill_scalar(self, input, mask, value):
         input_dims = self.shape_of(input)
         mask_dims = self.shape_of(mask)

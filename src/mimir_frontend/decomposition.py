@@ -31,6 +31,8 @@ MIMIR_DECOMPOSITION_POLICY = DecompositionPolicy(
     fallback=(
         torch.ops.aten.hardswish.default,
         torch.ops.aten.hardsigmoid.default,
+        torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default,
+        torch.ops.aten._safe_softmax.default,
     ),
     preserve=(
         torch.ops.aten.native_layer_norm.default,
@@ -38,6 +40,7 @@ MIMIR_DECOMPOSITION_POLICY = DecompositionPolicy(
     triggers=(
         torch.nn.functional.hardswish,
         torch.nn.functional.multi_head_attention_forward,
+        torch.nn.functional.scaled_dot_product_attention,
         torch.ops.aten.hardswish.default,
     ),
 )
