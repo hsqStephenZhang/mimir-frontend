@@ -3306,26 +3306,67 @@ class OperatorLibrary:
         out_dims = list(dims)
         out_dims[axis0], out_dims[axis1] = out_dims[axis1], out_dims[axis0]
 
+        logical_permutation = list(range(rank))
+        logical_permutation[axis0], logical_permutation[axis1] = (
+            logical_permutation[axis1],
+            logical_permutation[axis0],
+        )
         physical_axes = [
             axis for axis, extent in enumerate(dims)
             if not self._is_lit_nat_value(extent, 1)
         ]
-        if axis0 not in physical_axes or axis1 not in physical_axes:
+        physical_dims = [dims[axis] for axis in physical_axes]
+        physical_rank = self._lit_nat(len(physical_dims))
+        if axis0 in physical_axes and axis1 in physical_axes:
+            callee = self.world.annex(torch_dialect.shape.transpose_int.value)
+            callee = self._apply_grouped(
+                callee,
+                [
+                    self._tensor_element_type(x),
+                    physical_rank,
+                    self.world.tuple(physical_dims),
+                ],
+            )
+            result = self.world.app(
+                callee,
+                self.world.tuple(
+                    [
+                        x,
+                        self.world.lit_i64(physical_axes.index(axis0)),
+                        self.world.lit_i64(physical_axes.index(axis1)),
+                    ]
+                ),
+            )
+            return self._remember_shape(result, out_dims)
+
+        physical_output_axes = [
+            axis for axis in logical_permutation if axis in physical_axes
+        ]
+        physical_permutation = [
+            physical_axes.index(axis) for axis in physical_output_axes
+        ]
+        if physical_permutation == list(range(len(physical_axes))):
             return self._remember_shape(x, out_dims)
 
-        physical_dims = [dims[axis] for axis in physical_axes]
-        physical_dim0 = physical_axes.index(axis0)
-        physical_dim1 = physical_axes.index(axis1)
-        callee = self.world.annex(torch_dialect.shape.transpose_int.value)
+        callee = self.world.annex(torch_dialect.shape.permute.value)
         callee = self._apply_grouped(
             callee,
-            [self._tensor_element_type(x), self._lit_nat(len(physical_dims)),
-             self.world.tuple(physical_dims)],
+            [
+                self._tensor_element_type(x),
+                physical_rank,
+                self.world.tuple(physical_dims),
+            ],
         )
+        idx_t = self.world.type_idx(physical_rank)
         result = self.world.app(
             callee,
             self.world.tuple(
-                [x, self.world.lit_i64(physical_dim0), self.world.lit_i64(physical_dim1)]
+                [
+                    x,
+                    self.world.tuple(
+                        [self.world.lit(idx_t, axis) for axis in physical_permutation]
+                    ),
+                ]
             ),
         )
         return self._remember_shape(result, out_dims)

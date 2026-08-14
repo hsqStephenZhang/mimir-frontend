@@ -51,3 +51,22 @@ def test_policy_does_not_retrace_a_graph_without_a_fallback_trigger():
     assert apply_decomposition_policy(
         gm, [torch.randn(2, 4)], MIMIR_DECOMPOSITION_POLICY
     ) is gm
+
+
+def test_mimir_policy_retraces_python_multihead_attention_to_aten():
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = torch.nn.MultiheadAttention(16, 4)
+
+        def forward(self, x):
+            return self.attn(x, x, x)[0]
+
+    x = torch.randn(8, 2, 16)
+    gm, _ = torch._dynamo.export(Attention().eval())(x)
+
+    lowered = apply_decomposition_policy(gm, [x], MIMIR_DECOMPOSITION_POLICY)
+    targets = _targets(lowered)
+
+    assert torch.nn.functional.multi_head_attention_forward not in targets
+    assert torch.ops.aten.bmm.default in targets

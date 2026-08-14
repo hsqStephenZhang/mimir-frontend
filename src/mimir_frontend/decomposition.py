@@ -37,6 +37,7 @@ MIMIR_DECOMPOSITION_POLICY = DecompositionPolicy(
     ),
     triggers=(
         torch.nn.functional.hardswish,
+        torch.nn.functional.multi_head_attention_forward,
         torch.ops.aten.hardswish.default,
     ),
 )

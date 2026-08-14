@@ -138,6 +138,7 @@ class FXGraphTranslator:
         m["aten.permute.default"] = self._wrap_permute()
         m["aten.transpose.int"] = self._wrap_transpose()
         m["t"] = self._wrap_t()
+        m["aten.t.default"] = self._wrap_t()
         m["transpose"] = self._wrap_transpose()
         
         m[torch.reshape] = self._wrap_reshape()

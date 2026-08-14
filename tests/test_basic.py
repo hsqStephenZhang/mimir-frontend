@@ -738,6 +738,22 @@ def test_qwen_exact_transpose_int_overload_is_registered():
     assert "%torch.shape.transpose_int" in def_to_string(result)
 
 
+def test_transpose_moves_folded_singleton_across_physical_axes():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            expanded = torch.ops.aten.unsqueeze.default(x, 0)
+            moved = torch.ops.aten.transpose.int(expanded, 0, -2)
+            squeezed = torch.ops.aten.squeeze.dim(moved, -2)
+            return torch.ops.aten.reshape.default(squeezed, [3, 4, 2, 5])
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(4, 2, 3, 5)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [3, 4, 2, 5]
+    assert "%torch.shape.permute" in def_to_string(result)
+
+
 def test_qwen_exact_unsafe_view_overload_is_registered():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -835,6 +851,19 @@ def test_tensor_T_maps_to_matrix_transpose():
     class Model(torch.nn.Module):
         def forward(self, x):
             return x.T
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(3, 5)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [5, 3]
+    assert "%torch.shape.permute" in def_to_string(result)
+
+
+def test_exact_aten_t_overload_maps_to_matrix_transpose():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.t.default(x)
 
     world = make_world()
     x = make_static_inputs_with_shapes(world, [(3, 5)])[0]

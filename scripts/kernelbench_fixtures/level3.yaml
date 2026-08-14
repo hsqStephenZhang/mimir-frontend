@@ -17,3 +17,9 @@
   init_args: [3, 6, 16, 16]
   input_shapes: [2x3x32x32]
   initializations: [rnd]
+
+- kernel: level3/31_VisionAttention.py
+  scalable: false
+  init_args: [16, 4]
+  input_shapes: [2x16x8x8]
+  initializations: [rnd]
