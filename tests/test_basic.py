@@ -1906,7 +1906,7 @@ def test_mean_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.reduction.mean_dims" in def_to_string(result)
+    assert "%torch.reduction.mean_all" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dim", [[], ()])

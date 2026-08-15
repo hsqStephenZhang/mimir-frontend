@@ -1680,6 +1680,16 @@ class OperatorLibrary:
             )
             result = self.world.app(callee, input)
             return self._remember_shape(result, [])
+        if reduce_all and kind == "mean" and not keepdim:
+            callee = self.world.annex(torch_dialect.reduction.mean_all.value)
+            callee = self.world.app(
+                callee, self._torch_semantics(input, floating=True)
+            )
+            callee = self._apply_grouped(
+                callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
+            )
+            result = self.world.app(callee, input)
+            return self._remember_shape(result, [])
 
         if reduce_all:
             dim_list = list(range(logical_rank))
