@@ -294,6 +294,8 @@ class FXGraphTranslator:
         m["aten.native_layer_norm.default"] = self._wrap_layer_norm(native=True)
 
         # Normalization
+        m[torch.nn.functional.group_norm] = self._wrap_group_norm()
+        m[torch.nn.functional.instance_norm] = self._wrap_instance_norm()
         m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
         m["batch_norm"] = self._wrap_functional_batch_norm()
         m["aten.batch_norm.default"] = self._wrap_aten_batch_norm()
@@ -986,6 +988,37 @@ class FXGraphTranslator:
             return self.ops.batch_norm_inference(
                 input_def, running_mean, running_var, weight, bias, eps
             )
+        return convert
+
+    def _wrap_group_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            return self.ops.group_norm(
+                args[0],
+                args[1] if len(args) > 1 else kwargs["num_groups"],
+                args[2] if len(args) > 2 else kwargs.get("weight"),
+                args[3] if len(args) > 3 else kwargs.get("bias"),
+                args[4] if len(args) > 4 else kwargs.get("eps", 1e-5),
+            )
+        return convert
+
+    def _wrap_instance_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            running_mean = args[1] if len(args) > 1 else kwargs.get("running_mean")
+            running_var = args[2] if len(args) > 2 else kwargs.get("running_var")
+            weight = args[3] if len(args) > 3 else kwargs.get("weight")
+            bias = args[4] if len(args) > 4 else kwargs.get("bias")
+            use_input_stats = args[5] if len(args) > 5 else kwargs.get("use_input_stats", True)
+            eps = args[7] if len(args) > 7 else kwargs.get("eps", 1e-5)
+            if not use_input_stats or running_mean is not None or running_var is not None:
+                raise NotImplementedError(
+                    "instance_norm currently requires input statistics"
+                )
+            channels = self.ops.shape_of(args[0])[1]
+            return self.ops.group_norm(args[0], channels, weight, bias, eps)
         return convert
 
     def _wrap_aten_batch_norm(self):

@@ -1627,6 +1627,37 @@ class OperatorLibrary:
         self._remember_shape(result.proj(3, 2), stat_dims)
         return result
 
+    def group_norm(self, input, groups, weight=None, bias=None, eps=1e-5):
+        """Map GroupNorm/InstanceNorm; statistics and affine semantics live in MimIR."""
+        dims = self.shape_of(input)
+        elem_type = self._tensor_element_type(input)
+        channels = dims[1]
+        channel_type = self.world.arr(channels, elem_type)
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        callee = self.world.annex(torch_dialect.normalization.group_norm.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        groups_def = groups if isinstance(groups, mim.Def) else self._lit_nat(groups)
+        result = self.world.app(
+            callee,
+            self.world.tuple(
+                [input, optional(weight), optional(bias), groups_def,
+                 self._f32_float_lit(eps)]
+            ),
+        )
+        return self._remember_shape(result, dims)
+
 
     def _torch_reduce(self, kind, input, dim, keepdim):
         dims = self.shape_of(input)

@@ -1109,6 +1109,34 @@ def test_aten_batch_norm_inference_translates():
     assert "%torch.normalization.batch_norm_inference" in def_to_string(result)
 
 
+def test_functional_group_norm_maps_directly_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.nn.functional.group_norm(x, 2, weight, bias, 1e-5)
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 3, 5), (4,), (4,)]
+    )
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 4, 3, 5]
+    assert "%torch.normalization.group_norm" in def_to_string(result)
+
+
+def test_functional_instance_norm_maps_to_group_norm_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.instance_norm(x, use_input_stats=True)
+
+    world = make_world()
+    (x,) = make_static_inputs_with_shapes(world, [(2, 4, 3, 5)])
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [2, 4, 3, 5]
+    assert "%torch.normalization.group_norm" in def_to_string(result)
+
+
 def test_inplace_residual_add_and_relu_translate_as_values():
     class Model(torch.nn.Module):
         def forward(self, x, residual):

@@ -907,6 +907,18 @@ def test_native_layer_norm_three_results_match_eager():
     )
 
 
+def test_group_norm_matches_eager():
+    check_against_eager(
+        torch.nn.GroupNorm(2, 4).eval(), torch.randn(2, 4, 3, 5)
+    )
+
+
+def test_instance_norm_matches_eager():
+    check_against_eager(
+        torch.nn.InstanceNorm2d(4).eval(), torch.randn(2, 4, 3, 5)
+    )
+
+
 def test_pytorch_fallback_decomposition_matches_eager():
     class HardSwishLayerNorm(torch.nn.Module):
         def __init__(self):
