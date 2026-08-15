@@ -1137,6 +1137,19 @@ def test_functional_instance_norm_maps_to_group_norm_semantics():
     assert "%torch.normalization.group_norm" in def_to_string(result)
 
 
+def test_smooth_l1_mean_maps_directly_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x, target):
+            return torch.nn.functional.smooth_l1_loss(x, target, beta=0.5)
+
+    world = make_world()
+    x, target = make_static_inputs_with_shapes(world, [(3, 5), (3, 5)])
+    result = translate_model(Model(), [x, target])
+
+    assert tensor_shape_values(result) == []
+    assert "%torch.loss.smooth_l1_mean" in def_to_string(result)
+
+
 def test_inplace_residual_add_and_relu_translate_as_values():
     class Model(torch.nn.Module):
         def forward(self, x, residual):

@@ -1658,6 +1658,20 @@ class OperatorLibrary:
         )
         return self._remember_shape(result, dims)
 
+    def smooth_l1_mean(self, input, target, beta=1.0):
+        """Map mean-reduced SmoothL1; piecewise and reduction semantics live in MimIR."""
+        dims = self.shape_of(input)
+        callee = self.world.annex(torch_dialect.loss.smooth_l1_mean.value)
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        callee = self.world.app(callee, self.world.tuple([input, target]))
+        result = self.world.app(callee, self._f32_float_lit(beta))
+        return self._remember_shape(result, [])
+
 
     def _torch_reduce(self, kind, input, dim, keepdim):
         dims = self.shape_of(input)

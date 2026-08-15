@@ -919,6 +919,15 @@ def test_instance_norm_matches_eager():
     )
 
 
+@pytest.mark.parametrize("beta", [0.0, 0.5, 1.0])
+def test_smooth_l1_mean_matches_eager(beta):
+    class SmoothL1(torch.nn.Module):
+        def forward(self, x, target):
+            return torch.nn.functional.smooth_l1_loss(x, target, beta=beta)
+
+    check_against_eager(SmoothL1(), torch.randn(3, 5), torch.randn(3, 5))
+
+
 def test_pytorch_fallback_decomposition_matches_eager():
     class HardSwishLayerNorm(torch.nn.Module):
         def __init__(self):

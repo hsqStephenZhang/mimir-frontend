@@ -297,6 +297,7 @@ class FXGraphTranslator:
         m[torch.nn.functional.group_norm] = self._wrap_group_norm()
         m[torch.nn.functional.instance_norm] = self._wrap_instance_norm()
         m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
+        m[torch.nn.functional.smooth_l1_loss] = self._wrap_smooth_l1_loss()
         m["batch_norm"] = self._wrap_functional_batch_norm()
         m["aten.batch_norm.default"] = self._wrap_aten_batch_norm()
 
@@ -1019,6 +1020,19 @@ class FXGraphTranslator:
                 )
             channels = self.ops.shape_of(args[0])[1]
             return self.ops.group_norm(args[0], channels, weight, bias, eps)
+        return convert
+
+    def _wrap_smooth_l1_loss(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            reduction = args[2] if len(args) > 2 else kwargs.get("reduction", "mean")
+            beta = args[3] if len(args) > 3 else kwargs.get("beta", 1.0)
+            if reduction != "mean":
+                raise NotImplementedError(
+                    "smooth_l1_loss currently supports reduction='mean'"
+                )
+            return self.ops.smooth_l1_mean(args[0], args[1], beta)
         return convert
 
     def _wrap_aten_batch_norm(self):
