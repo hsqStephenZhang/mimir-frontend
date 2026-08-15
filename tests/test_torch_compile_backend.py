@@ -589,6 +589,21 @@ def test_int64_reduction_output_matches_eager(op):
     )
 
 
+@pytest.mark.parametrize(
+    "function",
+    [
+        lambda x: torch.norm(x, p="fro"),
+        lambda x: torch.norm(x, p=2, dim=1, keepdim=True),
+    ],
+)
+def test_norm2_matches_eager(function):
+    class Norm(torch.nn.Module):
+        def forward(self, x):
+            return function(x)
+
+    check_against_eager(Norm(), torch.randn(2, 3, 4))
+
+
 def test_repeat_matches_eager():
     class Repeat(torch.nn.Module):
         def forward(self, x):

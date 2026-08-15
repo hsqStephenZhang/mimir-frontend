@@ -1289,6 +1289,28 @@ def test_log_maps_to_torch_unary_semantics():
     assert "%torch.unary.log" in def_to_string(result)
 
 
+@pytest.mark.parametrize(
+    "function,annex",
+    [
+        (lambda x: torch.norm(x, p="fro"), "%torch.reduction.norm2_dims"),
+        (
+            lambda x: torch.norm(x, p=2, dim=1, keepdim=True),
+            "%torch.reduction.norm2_dims_keepdim",
+        ),
+    ],
+)
+def test_norm2_maps_to_torch_reduction_semantics(function, annex):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return function(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert annex in def_to_string(result)
+
+
 def test_tensor_permute_variadic_method_translates():
     class Model(torch.nn.Module):
         def forward(self, x):

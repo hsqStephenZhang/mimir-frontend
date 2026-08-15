@@ -1271,6 +1271,62 @@ class OperatorLibrary:
             return self._reduce_aff(input, self.F32, self._f32_reduce_lambda(self.f32_max_axm), self._f32_float_lit(-float("inf")), dim=dim, keepdim=True)
         return self._torch_reduce("amax", input, dim, keepdim)
 
+    def norm(self, input, p="fro", dim=None, keepdim=False, dtype=None):
+        """Map the L2/Frobenius cases of `torch.norm` to MimIR semantics."""
+        if p not in (2, 2.0, "fro"):
+            raise NotImplementedError(f"torch.norm p={p!r} is not implemented")
+        if dtype is not None:
+            raise NotImplementedError("torch.norm dtype conversion is not implemented")
+        logical_dims = self.shape_of(input)
+        logical_rank = len(logical_dims)
+        dimensions = (
+            list(range(logical_rank))
+            if dim is None
+            else list(dim) if isinstance(dim, (tuple, list)) else [dim]
+        )
+        canonical = [d + logical_rank if d < 0 else d for d in dimensions]
+        if (
+            not canonical
+            or any(d < 0 or d >= logical_rank for d in canonical)
+            or len(set(canonical)) != len(canonical)
+        ):
+            raise ValueError("norm dimensions must be non-empty, unique, and in range")
+        output_dims = self.rules.reduce_shape_spec(
+            logical_dims, dim=canonical, keepdim=keepdim
+        ).output_dims
+        physical_axes = [
+            axis for axis, extent in enumerate(logical_dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        physical_dims = [logical_dims[axis] for axis in physical_axes]
+        reduced_axes = [
+            physical_axes.index(axis) for axis in canonical if axis in physical_axes
+        ]
+        if not reduced_axes:
+            return self._remember_shape(self.abs(input), output_dims)
+
+        op = (
+            torch_dialect.reduction.norm2_dims_keepdim
+            if keepdim
+            else torch_dialect.reduction.norm2_dims
+        )
+        callee = self.world.annex(op.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._lit_nat(len(physical_dims)),
+                self._lit_nat(len(reduced_axes)),
+                self.world.tuple(physical_dims),
+            ],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([self.world.lit_i64(axis) for axis in reduced_axes]),
+        )
+        result = self.world.app(callee, input)
+        return self._remember_shape(result, output_dims)
+
     def dim_extrema(self, input, dim, keepdim=False, *, kind="max"):
         """Map value+index max/min; tie and NaN semantics live in MimIR."""
         dims = self.shape_of(input)
