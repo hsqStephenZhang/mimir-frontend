@@ -849,6 +849,18 @@ def test_rank4_matmul_matches_eager():
     )
 
 
+def test_tensor_matrix_matmul_matches_eager():
+    class TensorMatrixMatmul(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return lhs @ rhs
+
+    check_against_eager(
+        TensorMatrixMatmul(),
+        torch.randn(2, 3, 5),
+        torch.randn(5, 7),
+    )
+
+
 def test_bmm_matches_eager():
     class BatchedMatmul(torch.nn.Module):
         def forward(self, lhs, rhs):
