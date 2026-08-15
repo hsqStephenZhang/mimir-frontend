@@ -270,7 +270,7 @@ def _emit_profile(driver, profile: str, build_dir: Path, name: str, debug_dir) -
 
 
 def _check_tensors(
-    tensors, what: str, *, allowed_dtypes=(torch.float32,)
+    tensors, what: str, *, allowed_dtypes=(torch.float32,), allow_scalar=False
 ) -> None:
     for i, t in enumerate(tensors):
         if not isinstance(t, torch.Tensor):
@@ -281,7 +281,7 @@ def _check_tensors(
                 f"mimir backend supports {supported} {what}s, "
                 f"{what} {i} has dtype {t.dtype}"
             )
-        if t.dim() == 0:
+        if t.dim() == 0 and not allow_scalar:
             raise NotImplementedError(f"mimir backend does not support 0-d tensor {what}s")
 
 
@@ -380,11 +380,23 @@ def mimir_backend(
     # Shapes are static: one specialization per Dynamo guard set.
     input_shapes = [tuple(t.shape) for t in example_inputs]
     input_dtypes = [t.dtype for t in example_inputs]
-    _check_tensors(example_outs, "output")
+    _check_tensors(
+        example_outs,
+        "output",
+        allowed_dtypes=(torch.float32, torch.int64),
+        allow_scalar=True,
+    )
     out_shapes = [tuple(t.shape) for t in example_outs]
+    out_dtypes = [t.dtype for t in example_outs]
+    if len(set(out_dtypes)) != 1:
+        raise NotImplementedError(
+            "mimir backend requires homogeneous output dtypes for its flat-buffer ABI"
+        )
+    output_dtype = out_dtypes[0]
     out_numels = [math.prod(shape) for shape in out_shapes]
     out_offsets = [sum(out_numels[:i]) for i in range(len(out_numels))]
     total_numel = sum(out_numels)
+    scalar_output = len(out_shapes) == 1 and not out_shapes[0]
 
     _pack_outputs(gm, out_shapes)
 
@@ -470,7 +482,8 @@ def mimir_backend(
         scalar_ctypes[dtype] if is_scalar else ctypes.c_void_p
         for dtype, is_scalar in zip(input_dtypes, scalar_input, strict=True)
     ]
-    fn.restype = ctypes.POINTER(ctypes.c_float)
+    output_ctype = scalar_ctypes[output_dtype]
+    fn.restype = output_ctype if scalar_output else ctypes.POINTER(output_ctype)
 
     def compiled(*args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # Keep the contiguous buffers referenced until the call returns.
@@ -481,10 +494,15 @@ def mimir_backend(
                 buffers, input_dtypes, scalar_input, strict=True
             )
         ]
-        out_ptr = fn(*native_args)
-        array = ctypes.cast(out_ptr, ctypes.POINTER(ctypes.c_float * total_numel)).contents
-        flat = torch.frombuffer(array, dtype=torch.float32).clone()
-        _LIBC.free(ctypes.cast(out_ptr, ctypes.c_void_p))
+        native_result = fn(*native_args)
+        if scalar_output:
+            flat = torch.tensor([native_result], dtype=output_dtype)
+        else:
+            array = ctypes.cast(
+                native_result, ctypes.POINTER(output_ctype * total_numel)
+            ).contents
+            flat = torch.frombuffer(array, dtype=output_dtype).clone()
+            _LIBC.free(ctypes.cast(native_result, ctypes.c_void_p))
         # The outputs are disjoint views of one flat buffer.
         return restore(
             flat[offset : offset + numel].reshape(shape)

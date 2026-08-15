@@ -89,6 +89,7 @@ class FXGraphTranslator:
             (torch.relu, "aten.relu.default", self.ops.relu),
             (torch.nn.functional.relu, "relu", self.ops.relu),
             (torch.exp, "aten.exp.default", self.ops.exp),
+            (torch.log, "aten.log.default", self.ops.log),
             (torch.tanh, "aten.tanh.default", self.ops.tanh),
             (torch.sqrt, "aten.sqrt.default", self.ops.sqrt),
             (torch.sin, "aten.sin.default", self.ops.sin),
@@ -118,6 +119,23 @@ class FXGraphTranslator:
         m[torch.nn.functional.gelu] = gelu
         m["gelu"] = gelu
         m["aten.gelu.default"] = gelu
+        selu = self._wrap_activation_inplace(self.ops.selu)
+        m[torch.selu] = selu
+        m[torch.nn.functional.selu] = selu
+        m["selu"] = selu
+        m["aten.selu.default"] = selu
+        elu = self._wrap_elu()
+        m[torch.nn.functional.elu] = elu
+        m["elu"] = elu
+        m["aten.elu.default"] = self._wrap_elu(aten=True)
+        hardsigmoid = self._wrap_activation_inplace(self.ops.hardsigmoid)
+        m[torch.nn.functional.hardsigmoid] = hardsigmoid
+        m["hardsigmoid"] = hardsigmoid
+        m["aten.hardsigmoid.default"] = hardsigmoid
+        softplus = self._wrap_softplus()
+        m[torch.nn.functional.softplus] = softplus
+        m["softplus"] = softplus
+        m["aten.softplus.default"] = softplus
 
         # Prims
         if hasattr(torch.ops, "prims") and hasattr(torch.ops.prims, "convert_element_type"):
@@ -237,6 +255,12 @@ class FXGraphTranslator:
         m[torch.min] = self._wrap_max("min")
         m["aten.min.default"] = self._wrap_max("min")
         m["aten.min.dim"] = self._wrap_max("min")
+        m[torch.argmax] = self._wrap_arg_extrema("max")
+        m["argmax"] = self._wrap_arg_extrema("max")
+        m["aten.argmax.default"] = self._wrap_arg_extrema("max")
+        m[torch.argmin] = self._wrap_arg_extrema("min")
+        m["argmin"] = self._wrap_arg_extrema("min")
+        m["aten.argmin.default"] = self._wrap_arg_extrema("min")
         m[torch.mean] = self._wrap_reduction(self.ops.mean)
         m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
@@ -725,6 +749,53 @@ class FXGraphTranslator:
             return self.ops.gelu(args[0], approximate=approximate)
         return convert
 
+    def _wrap_activation_inplace(self, op_func):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            inplace = (
+                args[1] if len(args) > 1 else node.kwargs.get("inplace", False)
+            )
+            if inplace:
+                raise NotImplementedError("in-place activation is not supported")
+            return op_func(args[0])
+        return convert
+
+    def _wrap_elu(self, *, aten=False):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            alpha = args[1] if len(args) > 1 else node.kwargs.get("alpha", 1.0)
+            if aten:
+                scale = args[2] if len(args) > 2 else node.kwargs.get("scale", 1.0)
+                input_scale = (
+                    args[3]
+                    if len(args) > 3
+                    else node.kwargs.get("input_scale", 1.0)
+                )
+            else:
+                inplace = (
+                    args[2]
+                    if len(args) > 2
+                    else node.kwargs.get("inplace", False)
+                )
+                if inplace:
+                    raise NotImplementedError("in-place elu is not supported")
+                scale = 1.0
+                input_scale = 1.0
+            return self.ops.elu(
+                args[0], alpha=alpha, scale=scale, input_scale=input_scale
+            )
+        return convert
+
+    def _wrap_softplus(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            beta = args[1] if len(args) > 1 else node.kwargs.get("beta", 1.0)
+            threshold = (
+                args[2] if len(args) > 2 else node.kwargs.get("threshold", 20.0)
+            )
+            return self.ops.softplus(args[0], beta=beta, threshold=threshold)
+        return convert
+
     def _wrap_leaky_relu(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
@@ -762,6 +833,21 @@ class FXGraphTranslator:
             if kind == "min":
                 raise NotImplementedError("torch.min without dim is not implemented")
             return self.ops.amax(args[0], dim=None, keepdim=False)
+        return convert
+
+    def _wrap_arg_extrema(self, kind):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", None)
+            keepdim = (
+                args[2] if len(args) > 2 else node.kwargs.get("keepdim", False)
+            )
+            if dim is None:
+                raise NotImplementedError("argmax/argmin without dim is not implemented")
+            _, indices = self.ops.dim_extrema(
+                args[0], dim, keepdim=keepdim, kind=kind
+            )
+            return indices
         return convert
 
     def _wrap_var_mean_correction(self):
@@ -979,8 +1065,10 @@ class FXGraphTranslator:
     def _wrap_cumprod(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
-            return self.ops.cumprod(args[0], args[1], dtype=dtype)
+            kwargs = self._retrieve_args(node.kwargs)
+            dim = args[1] if len(args) > 1 else kwargs.get("dim")
+            dtype = args[2] if len(args) > 2 else kwargs.get("dtype")
+            return self.ops.cumprod(args[0], dim, dtype=dtype)
         return convert
 
     def _wrap_roll(self):

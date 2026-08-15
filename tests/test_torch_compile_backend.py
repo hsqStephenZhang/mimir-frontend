@@ -551,6 +551,44 @@ def test_gelu_matches_eager(approximate):
     check_against_eager(Gelu(), torch.linspace(-3, 3, 24).reshape(2, 3, 4))
 
 
+@pytest.mark.parametrize(
+    "function",
+    [
+        lambda x: torch.selu(x),
+        lambda x: torch.nn.functional.elu(x, alpha=0.5),
+        lambda x: torch.nn.functional.hardsigmoid(x),
+        lambda x: torch.nn.functional.softplus(x, beta=2.0, threshold=10.0),
+    ],
+)
+def test_additional_activation_matches_eager(function):
+    class Activation(torch.nn.Module):
+        def forward(self, x):
+            return function(x)
+
+    check_against_eager(Activation(), torch.linspace(-4.0, 4.0, 17))
+
+
+def test_scalar_tensor_output_matches_eager():
+    class ScalarLoss(torch.nn.Module):
+        def forward(self, x, target):
+            return torch.mean((x - target) ** 2)
+
+    check_against_eager(
+        ScalarLoss(), torch.randn(3, 5), torch.randn(3, 5)
+    )
+
+
+@pytest.mark.parametrize("op", [torch.argmax, torch.argmin])
+def test_int64_reduction_output_matches_eager(op):
+    class IndexReduction(torch.nn.Module):
+        def forward(self, x):
+            return op(x, dim=1)
+
+    check_against_eager(
+        IndexReduction(), torch.tensor([[3.0, -1.0, 2.0], [0.5, 4.0, 1.0]])
+    )
+
+
 def test_repeat_matches_eager():
     class Repeat(torch.nn.Module):
         def forward(self, x):

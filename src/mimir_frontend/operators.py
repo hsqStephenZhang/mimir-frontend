@@ -675,6 +675,59 @@ class OperatorLibrary:
             self.world.tuple([self.world.lit_bool(approximate == "tanh"), x]),
         )
         return self._remember_shape(result, dims)
+
+    def elu(self, x, *, alpha=1.0, scale=1.0, input_scale=1.0):
+        """Map `aten.elu`; piecewise scalar semantics live in MimIR."""
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(x)
+        callee = self.world.annex(torch_dialect.activation.elu.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple(
+                [
+                    x,
+                    self._float_lit(elem_type, alpha),
+                    self._float_lit(elem_type, scale),
+                    self._float_lit(elem_type, input_scale),
+                ]
+            ),
+        )
+        return self._remember_shape(result, dims)
+
+    def selu(self, x):
+        return self._torch_unary("activation.selu", x, floating=True)
+
+    def hardsigmoid(self, x):
+        return self._torch_unary("activation.hardsigmoid", x, floating=True)
+
+    def softplus(self, x, *, beta=1.0, threshold=20.0):
+        """Map `aten.softplus`; threshold selection remains PE-visible in MimIR."""
+        dims = self.shape_of(x)
+        physical_dims = self._physical_dims(dims)
+        elem_type = self._tensor_element_type(x)
+        callee = self.world.annex(torch_dialect.activation.softplus.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple(
+                [
+                    x,
+                    self._float_lit(elem_type, beta),
+                    self._float_lit(elem_type, threshold),
+                ]
+            ),
+        )
+        return self._remember_shape(result, dims)
     def rsqrt(self, x): return self._torch_unary("unary.rsqrt", x, floating=True)
     
     def relu(self, x):
@@ -2894,12 +2947,35 @@ class OperatorLibrary:
         canonical_dim = dim + rank if dim < 0 else dim
         if canonical_dim < 0 or canonical_dim >= rank:
             raise ValueError(f"cumprod dim {dim} is out of range for rank {rank}")
-        callee = self.world.annex(torch_dialect.scan.cumprod.value)
-        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
-        callee = self._apply_grouped(
-            callee, [self._lit_nat(rank), self.world.tuple(dims)]
+        physical_axes = [
+            axis
+            for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        if not physical_axes and dims:
+            physical_axes = [rank - 1]
+        if canonical_dim not in physical_axes:
+            return input
+        physical_dims = [dims[axis] for axis in physical_axes]
+        physical_dim = physical_axes.index(canonical_dim)
+        op = (
+            torch_dialect.scan.cumprod_2d
+            if len(physical_dims) == 2
+            else torch_dialect.scan.cumprod
         )
-        result = self.world.app(callee, self.world.lit_i64(dim))
+        callee = self.world.annex(op.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        if len(physical_dims) == 2:
+            callee = self._apply_grouped(callee, physical_dims)
+        else:
+            callee = self._apply_grouped(
+                callee,
+                [
+                    self._lit_nat(len(physical_dims)),
+                    self.world.tuple(physical_dims),
+                ],
+            )
+        result = self.world.app(callee, self.world.lit_i64(physical_dim))
         result = self.world.app(result, input)
         return self._remember_shape(result, dims)
 

@@ -1253,6 +1253,42 @@ def test_gelu_translates_approximation_mode_to_static_flag():
     assert "tt" in text
 
 
+@pytest.mark.parametrize(
+    "function,annex",
+    [
+        (lambda x: torch.selu(x), "%torch.activation.selu"),
+        (lambda x: torch.nn.functional.elu(x, alpha=0.5), "%torch.activation.elu"),
+        (lambda x: torch.nn.functional.hardsigmoid(x), "%torch.activation.hardsigmoid"),
+        (
+            lambda x: torch.nn.functional.softplus(x, beta=2.0, threshold=10.0),
+            "%torch.activation.softplus",
+        ),
+    ],
+)
+def test_additional_activation_maps_to_torch_semantics(function, annex):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return function(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert annex in def_to_string(result)
+
+
+def test_log_maps_to_torch_unary_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.log(x)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert "%torch.unary.log" in def_to_string(result)
+
+
 def test_tensor_permute_variadic_method_translates():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -1373,7 +1409,19 @@ def test_cumprod_translates_to_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 4]
-    assert "%torch.scan.cumprod" in def_to_string(result)
+    assert "%torch.scan.cumprod_2d" in def_to_string(result)
+
+
+def test_cumprod_keyword_dim_translates_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.cumprod(x, dim=1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(4, 8)])[0]
+    result = translate_model(Model(), [x])
+
+    assert "%torch.scan.cumprod_2d" in def_to_string(result)
 
 
 def test_roll_translates_static_shifts_and_repeated_dims():
