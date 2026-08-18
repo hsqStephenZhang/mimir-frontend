@@ -61,6 +61,7 @@ class FXGraphTranslator:
 
         m[operator.iadd] = self._wrap_binary(self.ops.add)
         m["aten.add_.Tensor"] = self._wrap_binary(self.ops.add)
+        m[torch.multiply] = self._wrap_binary(self.ops.mul)
 
         m[torch.clamp] = self._wrap_clamp()
         m["aten.clamp.default"] = self._wrap_clamp()
@@ -136,6 +137,10 @@ class FXGraphTranslator:
         m[torch.nn.functional.softplus] = softplus
         m["softplus"] = softplus
         m["aten.softplus.default"] = softplus
+        mish = self._wrap_activation_inplace(self.ops.mish)
+        m[torch.nn.functional.mish] = mish
+        m["mish"] = mish
+        m["aten.mish.default"] = mish
 
         # Prims
         if hasattr(torch.ops, "prims") and hasattr(torch.ops.prims, "convert_element_type"):
@@ -202,6 +207,7 @@ class FXGraphTranslator:
         m["contiguous"] = self._wrap_contiguous()
         m["aten.contiguous.default"] = self._wrap_contiguous()
         m["detach_"] = self._wrap_alias()
+        m["detach"] = self._wrap_alias()
         m["aten.detach_.default"] = self._wrap_alias()
         m["aten.detach.default"] = self._wrap_alias()
         m["size"] = self._wrap_size()
@@ -265,6 +271,8 @@ class FXGraphTranslator:
         m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
+        m[torch.logsumexp] = self._wrap_reduction(self.ops.logsumexp)
+        m["aten.logsumexp.default"] = self._wrap_reduction(self.ops.logsumexp)
         m[torch.norm] = self._wrap_norm()
         m["norm"] = self._wrap_norm()
         m["aten.norm.ScalarOpt_dim"] = self._wrap_norm()
@@ -967,6 +975,8 @@ class FXGraphTranslator:
     def _wrap_max(self, kind):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
+            if kind == "min" and len(args) > 1 and not isinstance(args[1], int):
+                return self.ops.minimum(args[0], args[1])
             if len(args) > 1 or "dim" in node.kwargs:
                 dim = args[1] if len(args) > 1 else node.kwargs["dim"]
                 keepdim = args[2] if len(args) > 2 else node.kwargs.get("keepdim", False)

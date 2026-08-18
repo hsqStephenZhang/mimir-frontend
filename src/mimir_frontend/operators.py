@@ -730,6 +730,9 @@ class OperatorLibrary:
             ),
         )
         return self._remember_shape(result, dims)
+    def mish(self, x):
+        """Map Mish directly; softplus/tanh/multiply semantics live in MimIR."""
+        return self._torch_unary("activation.mish", x, floating=True)
     def rsqrt(self, x): return self._torch_unary("unary.rsqrt", x, floating=True)
     
     def relu(self, x):
@@ -1846,12 +1849,12 @@ class OperatorLibrary:
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
-        if len(dim_values) == 1 and not keepdim:
+        if len(dim_values) == 1 and not keepdim and kind != "logsumexp":
             callee = self.world.annex(
                 self._torch_annex_id(f"reduction.{kind}_dim")
             )
             dictionary = self._torch_semantics(
-                input, floating=kind in ("amax", "mean")
+                input, floating=kind in ("amax", "mean", "logsumexp")
             )
             callee = self.world.app(callee, dictionary)
             callee = self._apply_grouped(callee, [self._lit_nat(rank), shape])
@@ -1885,7 +1888,7 @@ class OperatorLibrary:
             name = "reduction.amax_dims"
         callee = self.world.annex(self._torch_annex_id(name))
         dictionary = self._torch_semantics(
-            input, floating=kind in ("amax", "mean")
+            input, floating=kind in ("amax", "mean", "logsumexp")
         )
         callee = self.world.app(callee, dictionary)
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
@@ -1915,6 +1918,12 @@ class OperatorLibrary:
         Translates to mean reduction.
         """
         return self._torch_reduce("mean", input, dim, keepdim)
+
+    def logsumexp(self, input, dim, keepdim=False):
+        """Map stable multi-axis logsumexp; its numerical semantics live in MimIR."""
+        if dim is None:
+            raise ValueError("logsumexp requires an explicit dim")
+        return self._torch_reduce("logsumexp", input, dim, keepdim)
 
         # Legacy pair reduction retained below for reference.
         pair_type = self.world.arr(self._lit_nat(2), self.F32)

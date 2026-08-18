@@ -479,6 +479,38 @@ def test_relu_preserves_nan():
     )
 
 
+def test_mish_matches_eager():
+    check_against_eager(
+        torch.nn.Mish().eval(),
+        torch.tensor([-20.0, -1.0, 0.0, 1.0, 20.0, float("nan")]),
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_logsumexp_matches_eager(keepdim):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.logsumexp(x, dim=1, keepdim=keepdim)
+
+    check_against_eager(
+        Model(),
+        torch.tensor([
+            [float("-inf"), float("-inf"), float("-inf")],
+            [float("inf"), 1.0, -1.0],
+            [1000.0, 999.0, -1000.0],
+        ]),
+    )
+
+
+def test_torch_min_tensor_overload_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.min(x, torch.tensor(0.5))
+
+    check_against_eager(Model(), torch.tensor([-1.0, 0.5, 2.0]))
+
+
 def test_hardtanh_matches_boundaries_and_preserves_nan():
     class Model(torch.nn.Module):
         def forward(self, x):

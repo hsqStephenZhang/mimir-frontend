@@ -161,6 +161,58 @@ SUPPORTED_UNARY_OPS = [
 ]
 
 
+def test_mish_maps_directly_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.mish(x)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+    assert "%torch.activation.mish" in def_to_string(result)
+
+
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_logsumexp_maps_directly_to_torch_semantics(keepdim):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.logsumexp(x, dim=1, keepdim=keepdim)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 1, "static", 3))
+    assert "%torch.reduction.logsumexp_dims" in def_to_string(result)
+
+
+def test_torch_min_tensor_overload_maps_to_binary_minimum():
+    class Model(torch.nn.Module):
+        def forward(self, x, y):
+            return torch.min(x, y)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 2, "static", 3))
+    assert "%torch.binary.minimum" in def_to_string(result)
+
+
+def test_torch_multiply_alias_maps_to_binary_mul():
+    class Model(torch.nn.Module):
+        def forward(self, x, y):
+            return torch.multiply(x, y)
+
+    world = make_world()
+    result = translate_model(Model(), make_inputs(world, 2, "static", 3))
+    assert "%torch.binary.mul" in def_to_string(result)
+
+
+def test_tensor_detach_method_returns_same_ssa_value():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.detach()
+
+    world = make_world()
+    input_def = make_inputs(world, 1, "static", 3)[0]
+    result = translate_model(Model(), [input_def])
+    assert result == input_def
+
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])
 def test_single_elementwise_operator(shape_kind, rank):
