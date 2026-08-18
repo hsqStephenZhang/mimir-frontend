@@ -47,7 +47,12 @@ and the complete Level 2 corpus validate these changes.
 ## Remaining Failures
 
 - 1 case: the fixture triggers a Dynamo graph break in `_warnings.warn` before
-  the MimIR backend is called.
+  the MimIR backend is called. Allowing that warning as reorderable exposes a
+  second, independent limitation: instance normalization of `[N, 1, 1, W]`
+  reaches the known singleton-dimension buffer mismatch in
+  `%tensor.lower_to_mem` (`Buf<2, [N,W]>` versus `N x Buf<1, [W]>`). This must
+  be fixed at the tensor/type boundary rather than hidden by a Torch-specific
+  decomposition.
 
 The three INVALID fixtures have incompatible shapes after fixture scaling and
 also fail under eager execution.
