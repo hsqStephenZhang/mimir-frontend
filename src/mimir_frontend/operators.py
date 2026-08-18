@@ -282,6 +282,27 @@ class OperatorLibrary:
     def _torch_binary(self, name, lhs, rhs, out_type=None, *, alpha=None):
         """Emit a Torch dialect binary op after frontend broadcasting."""
         if isinstance(rhs, (int, float)) or isinstance(lhs, (int, float)):
+            tensor_value = lhs if isinstance(lhs, mim.Def) else rhs
+            scalar_value = rhs if isinstance(lhs, mim.Def) else lhs
+            if (
+                name.startswith("comparison.")
+                and self._tensor_element_type(tensor_value) == self.I64
+            ):
+                comparison = name.removeprefix("comparison.")
+                if not isinstance(lhs, mim.Def):
+                    comparison = {
+                        "eq": "eq",
+                        "ne": "ne",
+                        "lt": "gt",
+                        "le": "ge",
+                        "gt": "lt",
+                        "ge": "le",
+                    }[comparison]
+                return self._torch_scalar(
+                    f"comparison.{comparison}_i64_scalar",
+                    tensor_value,
+                    scalar_value,
+                )
             scalar_ops = {
                 "binary.add": self.f32_add_axm, "binary.sub": self.f32_sub_axm,
                 "binary.mul": self.f32_mul_axm, "binary.div": self.f32_div_axm,
@@ -353,7 +374,12 @@ class OperatorLibrary:
             if name not in (
                 "binary.add_scalar",
                 "binary.sub_scalar",
+                "comparison.eq_i64_scalar",
                 "comparison.ne_i64_scalar",
+                "comparison.lt_i64_scalar",
+                "comparison.le_i64_scalar",
+                "comparison.gt_i64_scalar",
+                "comparison.ge_i64_scalar",
             ):
                 raise NotImplementedError(
                     f"{name} is not implemented for int64 tensors"
@@ -361,7 +387,12 @@ class OperatorLibrary:
             name = {
                 "binary.add_scalar": "binary.add_i64_scalar",
                 "binary.sub_scalar": "binary.sub_i64_scalar",
+                "comparison.eq_i64_scalar": "comparison.eq_i64_scalar",
                 "comparison.ne_i64_scalar": "comparison.ne_i64_scalar",
+                "comparison.lt_i64_scalar": "comparison.lt_i64_scalar",
+                "comparison.le_i64_scalar": "comparison.le_i64_scalar",
+                "comparison.gt_i64_scalar": "comparison.gt_i64_scalar",
+                "comparison.ge_i64_scalar": "comparison.ge_i64_scalar",
             }[name]
         callee = self.world.annex(self._torch_annex_id(name))
         if elem_type != self.I64:
@@ -1166,6 +1197,34 @@ class OperatorLibrary:
         callee = self._apply_grouped(callee, [self.F32, self._lit_nat(rank_value)])
         result = self.world.app(callee, self.world.tuple([shape_tuple, stride_tuple]))
         return self._remember_shape(result, list(shape))
+
+    def scalar_tensor(
+        self, value, dtype=None, layout=None, device=None, pin_memory=None
+    ):
+        if layout not in (None, torch.strided):
+            raise NotImplementedError("scalar_tensor requires strided layout")
+        if device is not None and torch.device(device).type != "cpu":
+            raise NotImplementedError("scalar_tensor currently supports CPU only")
+        if pin_memory not in (None, False):
+            raise NotImplementedError("scalar_tensor pin_memory=True is unsupported")
+
+        if dtype in (None, torch.float32, torch.float):
+            elem_type = self.F32
+            scalar = self._f32_float_lit(float(value))
+        elif dtype in (torch.int64, torch.long):
+            elem_type = self.I64
+            scalar = self.world.lit_i64(int(value))
+        elif dtype == torch.bool:
+            elem_type = self.Bool
+            scalar = self.world.lit_tt() if value else self.world.lit_ff()
+        else:
+            raise NotImplementedError(
+                f"scalar_tensor with dtype {dtype} is not implemented"
+            )
+
+        callee = self.world.annex(torch_dialect.creation.scalar_tensor.value)
+        result = self.world.app(self.world.app(callee, elem_type), scalar)
+        return self._remember_shape(result, [])
 
     def fill_scalar(self, input, value):
         dims = self.shape_of(input)

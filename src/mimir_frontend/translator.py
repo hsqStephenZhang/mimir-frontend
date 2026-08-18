@@ -231,6 +231,7 @@ class FXGraphTranslator:
         m[torch.full] = self._wrap_full()
         m[torch.tensor] = self._wrap_tensor_constant()
         m["aten.full.default"] = self._wrap_full()
+        m["aten.scalar_tensor.default"] = self._wrap_scalar_tensor()
         m[torch.zeros_like] = self._wrap_zeros_like()
         m["aten.zeros_like.default"] = self._wrap_zeros_like()
         m[torch.zeros] = self._wrap_zeros()
@@ -1656,6 +1657,14 @@ class FXGraphTranslator:
             fill_value = args[1] if len(args) > 1 else node.kwargs.get("fill_value")
             dtype = args[2] if len(args) > 2 else node.kwargs.get("dtype")
             return self.ops.full(shape, fill_value, dtype=dtype)
+        return convert
+
+    def _wrap_scalar_tensor(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            return self.ops.scalar_tensor(args[0], **kwargs)
+
         return convert
 
     def _wrap_zeros_like(self):

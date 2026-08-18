@@ -2485,6 +2485,20 @@ def test_full_operator(shape_kind):
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
 
+
+def test_scalar_tensor_maps_to_torch_creation_semantics():
+    world = make_world()
+    graph = fx.Graph()
+    scalar = graph.call_function(
+        torch.ops.aten.scalar_tensor.default,
+        args=(float("-inf"),),
+        kwargs={"dtype": torch.float32, "device": torch.device("cpu")},
+    )
+    graph.output(scalar)
+    result = FXGraphTranslator(world).translate(graph, [])
+
+    assert "%torch.creation.scalar_tensor" in def_to_string(result)
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 def test_expand_operator(shape_kind):
     class Model(torch.nn.Module):

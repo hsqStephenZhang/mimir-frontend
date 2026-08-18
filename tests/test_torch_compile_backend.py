@@ -722,6 +722,16 @@ def test_scalar_tensor_output_matches_eager():
     )
 
 
+def test_aten_scalar_tensor_constant_matches_eager():
+    class ScalarTensor(torch.nn.Module):
+        def forward(self, x):
+            return x + torch.ops.aten.scalar_tensor.default(
+                float("-inf"), dtype=torch.float32, device=torch.device("cpu")
+            )
+
+    check_against_eager(ScalarTensor(), torch.randn(2, 3))
+
+
 @pytest.mark.parametrize("op", [torch.argmax, torch.argmin])
 def test_int64_reduction_output_matches_eager(op):
     class IndexReduction(torch.nn.Module):
@@ -802,6 +812,30 @@ def test_i64_tensor_scalar_ne_matches_eager():
         torch.tensor([[0, 1, 2]], dtype=torch.int64),
         torch.randn(1, 3),
         torch.randn(1, 3),
+    )
+
+
+@pytest.mark.parametrize("comparison", ["eq", "lt", "le", "gt", "ge"])
+def test_i64_tensor_scalar_comparison_matches_eager(comparison):
+    class Compare(torch.nn.Module):
+        def forward(self, values, x, y):
+            if comparison == "eq":
+                predicate = values == 2
+            elif comparison == "lt":
+                predicate = values < 2
+            elif comparison == "le":
+                predicate = values <= 2
+            elif comparison == "gt":
+                predicate = values > 2
+            else:
+                predicate = values >= 2
+            return torch.where(predicate, x, y)
+
+    check_against_eager(
+        Compare(),
+        torch.tensor([[0, 1, 2, 3]], dtype=torch.int64),
+        torch.randn(1, 4),
+        torch.randn(1, 4),
     )
 
 
