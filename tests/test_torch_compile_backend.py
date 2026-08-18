@@ -511,6 +511,18 @@ def test_torch_min_tensor_overload_matches_eager():
     check_against_eager(Model(), torch.tensor([-1.0, 0.5, 2.0]))
 
 
+def test_native_group_norm_tuple_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.native_group_norm.default(
+                x, weight, bias, 2, 4, 15, 2, 1e-5
+            )
+
+    check_against_eager(
+        Model(), torch.randn(2, 4, 3, 5), torch.randn(4), torch.randn(4)
+    )
+
+
 def test_hardtanh_matches_boundaries_and_preserves_nan():
     class Model(torch.nn.Module):
         def forward(self, x):

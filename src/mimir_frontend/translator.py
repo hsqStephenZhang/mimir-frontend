@@ -300,6 +300,9 @@ class FXGraphTranslator:
         m[torch.nn.functional.layer_norm] = self._wrap_layer_norm(native=False)
         m[torch.native_layer_norm] = self._wrap_layer_norm(native=True)
         m["aten.native_layer_norm.default"] = self._wrap_layer_norm(native=True)
+        native_group_norm = self._wrap_native_group_norm()
+        m[torch.ops.aten.native_group_norm.default] = native_group_norm
+        m["aten.native_group_norm.default"] = native_group_norm
 
         # Normalization
         m[torch.nn.functional.group_norm] = self._wrap_group_norm()
@@ -1132,6 +1135,23 @@ class FXGraphTranslator:
                 args[3] if len(args) > 3 else kwargs.get("bias"),
                 args[4] if len(args) > 4 else kwargs.get("eps", 1e-5),
             )
+        return convert
+
+    def _wrap_native_group_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            return self.ops.native_group_norm(
+                args[0],
+                args[1] if len(args) > 1 else kwargs.get("weight"),
+                args[2] if len(args) > 2 else kwargs.get("bias"),
+                args[3] if len(args) > 3 else kwargs["N"],
+                args[4] if len(args) > 4 else kwargs["C"],
+                args[5] if len(args) > 5 else kwargs["HxW"],
+                args[6] if len(args) > 6 else kwargs["group"],
+                args[7] if len(args) > 7 else kwargs.get("eps", 1e-5),
+            )
+
         return convert
 
     def _wrap_instance_norm(self):

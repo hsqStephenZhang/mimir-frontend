@@ -1679,6 +1679,64 @@ class OperatorLibrary:
         )
         return self._remember_shape(result, dims)
 
+    def native_group_norm(
+        self, input, weight, bias, n, channels, inner, groups, eps
+    ):
+        """Map the full Aten `(output, mean, rstd)` group-normalization schema."""
+        dims = self.shape_of(input)
+        elem_type = self._tensor_element_type(input)
+        channel_type = self.world.arr(dims[1], elem_type)
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        def nat(value):
+            if isinstance(value, mim.Def):
+                return value
+            if isinstance(value, int):
+                return self._lit_nat(value)
+            raise NotImplementedError(
+                "native_group_norm currently requires static integer shape arguments"
+            )
+
+        n_def = nat(n)
+        groups_def = nat(groups)
+        callee = self.world.annex(
+            torch_dialect.normalization.native_group_norm.value
+        )
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        callee = self.world.app(
+            callee, self.world.tuple([input, optional(weight), optional(bias)])
+        )
+        result = self.world.app(
+            callee,
+            self.world.tuple(
+                [
+                    n_def,
+                    nat(channels),
+                    nat(inner),
+                    groups_def,
+                    self._float_lit(elem_type, eps),
+                ]
+            ),
+        )
+        stat_dims = [n_def, groups_def]
+        self._remember_shape(result.proj(3, 0), dims)
+        self._remember_shape(result.proj(3, 1), stat_dims)
+        self._remember_shape(result.proj(3, 2), stat_dims)
+        return result
+
     def smooth_l1_mean(self, input, target, beta=1.0):
         """Map mean-reduced SmoothL1; piecewise and reduction semantics live in MimIR."""
         dims = self.shape_of(input)

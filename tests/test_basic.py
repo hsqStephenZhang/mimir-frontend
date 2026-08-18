@@ -213,6 +213,25 @@ def test_tensor_detach_method_returns_same_ssa_value():
     assert result == input_def
 
 
+def test_native_group_norm_maps_complete_tuple_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.native_group_norm.default(
+                x, weight, bias, 2, 4, 15, 2, 1e-5
+            )
+
+    world = make_world()
+    x = make_symbolic_tensor_input(
+        world, [world.lit_nat(v) for v in (2, 4, 3, 5)]
+    )
+    weight = make_symbolic_tensor_input(world, [world.lit_nat(4)])
+    bias = make_symbolic_tensor_input(world, [world.lit_nat(4)])
+    result = translate_model(
+        Model(), [x, weight, bias]
+    )
+    assert "%torch.normalization.native_group_norm" in def_to_string(result)
+
+
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank", [1, 3])
 def test_single_elementwise_operator(shape_kind, rank):
