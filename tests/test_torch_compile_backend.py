@@ -542,6 +542,76 @@ def test_conv1d_matches_eager():
     )
 
 
+def test_conv3d_matches_eager():
+    check_against_eager(
+        torch.nn.Conv3d(
+            4, 8, (3, 2, 3), stride=2, padding=(1, 0, 1), groups=2
+        ).eval(),
+        torch.randn(2, 4, 7, 8, 9),
+    )
+
+
+def test_conv_transpose2d_matches_eager():
+    check_against_eager(
+        torch.nn.ConvTranspose2d(
+            4,
+            6,
+            (3, 2),
+            stride=(2, 3),
+            padding=(1, 0),
+            output_padding=(1, 2),
+            dilation=(1, 2),
+            groups=2,
+        ).eval(),
+        torch.randn(2, 4, 3, 4),
+    )
+
+
+def test_conv_transpose1d_matches_eager():
+    check_against_eager(
+        torch.nn.ConvTranspose1d(
+            4,
+            6,
+            3,
+            stride=2,
+            padding=1,
+            output_padding=1,
+            dilation=2,
+            groups=2,
+        ).eval(),
+        torch.randn(2, 4, 5),
+    )
+
+
+def test_conv_transpose3d_unit_stride_matches_eager():
+    check_against_eager(
+        torch.nn.ConvTranspose3d(
+            4,
+            6,
+            (3, 2, 4),
+            padding=(1, 0, 1),
+            dilation=(1, 2, 1),
+            groups=2,
+        ).eval(),
+        torch.randn(2, 4, 3, 4, 5),
+    )
+
+
+def test_conv_transpose3d_strided_grouped_matches_eager():
+    check_against_eager(
+        torch.nn.ConvTranspose3d(
+            4,
+            6,
+            (3, 2, 3),
+            stride=(2, 2, 2),
+            padding=(1, 0, 1),
+            output_padding=(1, 1, 1),
+            groups=2,
+        ).eval(),
+        torch.randn(2, 4, 3, 4, 5),
+    )
+
+
 @pytest.mark.parametrize("approximate", ["none", "tanh"])
 def test_gelu_matches_eager(approximate):
     class Gelu(torch.nn.Module):

@@ -298,6 +298,8 @@ class FXGraphTranslator:
         m[torch.nn.functional.instance_norm] = self._wrap_instance_norm()
         m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
         m[torch.nn.functional.smooth_l1_loss] = self._wrap_smooth_l1_loss()
+        m[torch.nn.functional.kl_div] = self._wrap_kl_div()
+        m[torch.nn.functional.triplet_margin_loss] = self._wrap_triplet_margin_loss()
         m["batch_norm"] = self._wrap_functional_batch_norm()
         m["aten.batch_norm.default"] = self._wrap_aten_batch_norm()
 
@@ -341,13 +343,30 @@ class FXGraphTranslator:
             m[torch.conv1d] = self._wrap_conv1d()
         if hasattr(torch, "conv2d"):
             m[torch.conv2d] = self._wrap_conv2d()
+        if hasattr(torch, "conv3d"):
+            m[torch.conv3d] = self._wrap_conv3d()
+        if hasattr(torch, "conv_transpose2d"):
+            m[torch.conv_transpose2d] = self._wrap_conv_transpose2d()
+        if hasattr(torch, "conv_transpose1d"):
+            m[torch.conv_transpose1d] = self._wrap_conv_transpose1d()
+        if hasattr(torch, "conv_transpose3d"):
+            m[torch.conv_transpose3d] = self._wrap_conv_transpose3d()
         m[torch.nn.functional.conv1d] = self._wrap_conv1d()
         m[torch.nn.functional.conv2d] = self._wrap_conv2d()
+        m[torch.nn.functional.conv3d] = self._wrap_conv3d()
+        m[torch.nn.functional.conv_transpose2d] = self._wrap_conv_transpose2d()
+        m[torch.nn.functional.conv_transpose1d] = self._wrap_conv_transpose1d()
+        m[torch.nn.functional.conv_transpose3d] = self._wrap_conv_transpose3d()
         m["aten.convolution.default"] = self._wrap_convolution()
         m["aten.conv1d.default"] = self._wrap_conv1d()
         m["aten.conv2d.default"] = self._wrap_conv2d()
+        m["aten.conv3d.default"] = self._wrap_conv3d()
         m["conv1d"] = self._wrap_conv1d()
         m["conv2d"] = self._wrap_conv2d()
+        m["conv3d"] = self._wrap_conv3d()
+        m["conv_transpose2d"] = self._wrap_conv_transpose2d()
+        m["conv_transpose1d"] = self._wrap_conv_transpose1d()
+        m["conv_transpose3d"] = self._wrap_conv_transpose3d()
 
         # Pooling
         m[torch.nn.functional.max_pool2d] = self._wrap_max_pool2d()
@@ -479,9 +498,9 @@ class FXGraphTranslator:
             transposed = args[6] if len(args) > 6 else node.kwargs.get("transposed", False)
             output_padding = args[7] if len(args) > 7 else node.kwargs.get("output_padding", 0)
             groups = args[8] if len(args) > 8 else node.kwargs.get("groups", 1)
-            if transposed:
-                raise NotImplementedError("aten.convolution with transposed=True is not implemented")
-            if output_padding not in (0, [0, 0], (0, 0)):
+            if not transposed and output_padding not in (
+                0, [0], (0,), [0, 0], (0, 0), [0, 0, 0], (0, 0, 0)
+            ):
                 raise NotImplementedError("aten.convolution with output_padding is not implemented")
             return self.ops.convolution(
                 x,
@@ -491,6 +510,8 @@ class FXGraphTranslator:
                 padding=padding,
                 dilation=dilation,
                 groups=groups,
+                transposed=transposed,
+                output_padding=output_padding,
             )
         return convert
 
@@ -512,6 +533,105 @@ class FXGraphTranslator:
                 padding=padding,
                 dilation=dilation,
                 groups=groups,
+            )
+        return convert
+
+    def _wrap_conv3d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            weight = args[1]
+            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            stride = args[3] if len(args) > 3 else node.kwargs.get("stride", 1)
+            padding = args[4] if len(args) > 4 else node.kwargs.get("padding", 0)
+            dilation = args[5] if len(args) > 5 else node.kwargs.get("dilation", 1)
+            groups = args[6] if len(args) > 6 else node.kwargs.get("groups", 1)
+            return self.ops.convolution(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            )
+        return convert
+
+    def _wrap_conv_transpose2d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            weight = args[1]
+            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            stride = args[3] if len(args) > 3 else node.kwargs.get("stride", 1)
+            padding = args[4] if len(args) > 4 else node.kwargs.get("padding", 0)
+            output_padding = (
+                args[5] if len(args) > 5 else node.kwargs.get("output_padding", 0)
+            )
+            groups = args[6] if len(args) > 6 else node.kwargs.get("groups", 1)
+            dilation = args[7] if len(args) > 7 else node.kwargs.get("dilation", 1)
+            return self.ops.convolution(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                transposed=True,
+                output_padding=output_padding,
+            )
+        return convert
+
+    def _wrap_conv_transpose1d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            weight = args[1]
+            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            stride = args[3] if len(args) > 3 else node.kwargs.get("stride", 1)
+            padding = args[4] if len(args) > 4 else node.kwargs.get("padding", 0)
+            output_padding = (
+                args[5] if len(args) > 5 else node.kwargs.get("output_padding", 0)
+            )
+            groups = args[6] if len(args) > 6 else node.kwargs.get("groups", 1)
+            dilation = args[7] if len(args) > 7 else node.kwargs.get("dilation", 1)
+            return self.ops.convolution(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                transposed=True,
+                output_padding=output_padding,
+            )
+        return convert
+
+    def _wrap_conv_transpose3d(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            x = args[0]
+            weight = args[1]
+            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            stride = args[3] if len(args) > 3 else node.kwargs.get("stride", 1)
+            padding = args[4] if len(args) > 4 else node.kwargs.get("padding", 0)
+            output_padding = (
+                args[5] if len(args) > 5 else node.kwargs.get("output_padding", 0)
+            )
+            groups = args[6] if len(args) > 6 else node.kwargs.get("groups", 1)
+            dilation = args[7] if len(args) > 7 else node.kwargs.get("dilation", 1)
+            return self.ops.convolution(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                transposed=True,
+                output_padding=output_padding,
             )
         return convert
 
@@ -1033,6 +1153,55 @@ class FXGraphTranslator:
                     "smooth_l1_loss currently supports reduction='mean'"
                 )
             return self.ops.smooth_l1_mean(args[0], args[1], beta)
+        return convert
+
+    def _wrap_kl_div(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            size_average = (
+                args[2] if len(args) > 2 else kwargs.get("size_average")
+            )
+            reduce = args[3] if len(args) > 3 else kwargs.get("reduce")
+            if size_average is not None or reduce is not None:
+                raise NotImplementedError(
+                    "legacy kl_div size_average/reduce options are not implemented"
+                )
+            reduction = (
+                args[4] if len(args) > 4 else kwargs.get("reduction", "mean")
+            )
+            log_target = (
+                args[5] if len(args) > 5 else kwargs.get("log_target", False)
+            )
+            return self.ops.kl_div_reduced(
+                args[0], args[1], reduction, log_target
+            )
+        return convert
+
+    def _wrap_triplet_margin_loss(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+
+            def argument(index, name, default):
+                return args[index] if len(args) > index else kwargs.get(name, default)
+
+            size_average = argument(7, "size_average", None)
+            reduce = argument(8, "reduce", None)
+            if size_average is not None or reduce is not None:
+                raise NotImplementedError(
+                    "legacy triplet size_average/reduce options are not implemented"
+                )
+            return self.ops.triplet_margin_reduced(
+                args[0],
+                args[1],
+                args[2],
+                margin=argument(3, "margin", 1.0),
+                p=argument(4, "p", 2.0),
+                eps=argument(5, "eps", 1e-6),
+                swap=argument(6, "swap", False),
+                reduction=argument(9, "reduction", "mean"),
+            )
         return convert
 
     def _wrap_aten_batch_norm(self):

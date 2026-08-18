@@ -35,6 +35,8 @@ class OperatorLibrary:
         self.sym_map = {} # Mapping from symbolic name to MimIR Nat variable
         self._shape_cache: dict[mim.Def, list[mim.Def]] = {}
         self._torch_semantics_cache: dict[tuple[mim.Def, bool], mim.Def] = {}
+        self._flip_provenance: dict[mim.Def, tuple[mim.Def, tuple[int, ...]]] = {}
+        self._cumsum_provenance: dict[mim.Def, tuple[mim.Def, int, object]] = {}
 
         def bind_math_axm(axm_enum):
             axm = world.annex(axm_enum.value)
@@ -1459,6 +1461,19 @@ class OperatorLibrary:
             all(0 <= dim < logical_rank for dim in canonical)
             and len(set(canonical)) == len(canonical)
         )
+        if valid and len(canonical) == 1:
+            cumsum = self._cumsum_provenance.get(input)
+            if cumsum is not None:
+                cumsum_input, cumsum_dim, dtype = cumsum
+                inner_flip = self._flip_provenance.get(cumsum_input)
+                if (
+                    cumsum_dim == canonical[0]
+                    and inner_flip is not None
+                    and inner_flip[1] == tuple(canonical)
+                ):
+                    return self.cumsum(
+                        inner_flip[0], cumsum_dim, dtype=dtype, reverse=True
+                    )
         physical_axes = [
             axis for axis, extent in enumerate(logical_shape)
             if not self._is_lit_nat_value(extent, 1)
@@ -1493,7 +1508,10 @@ class OperatorLibrary:
             self.world.tuple([self.world.lit_i64(dim) for dim in physical_dims]),
         )
         result = self.world.app(callee, input)
-        return self._remember_shape(result, logical_shape)
+        result = self._remember_shape(result, logical_shape)
+        if valid:
+            self._flip_provenance[result] = (input, tuple(canonical))
+        return result
 
     def narrow(self, input, dim, start, length):
         """Lower Torch narrow while retaining its checked signed index semantics."""
@@ -1670,6 +1688,98 @@ class OperatorLibrary:
         )
         callee = self.world.app(callee, self.world.tuple([input, target]))
         result = self.world.app(callee, self._f32_float_lit(beta))
+        return self._remember_shape(result, [])
+
+    def kl_div_reduced(self, input, target, reduction, log_target=False):
+        """Map reduced KLDiv; pointwise and reduction branches live in MimIR."""
+        dims = self.shape_of(input)
+        target_dims = self.shape_of(target)
+        if not self.rules.same_shape(dims, target_dims):
+            raise ValueError("kl_div input and target must have the same shape")
+        if not dims:
+            raise NotImplementedError("reduced scalar kl_div is not implemented")
+        reduction_tags = {"sum": 0, "mean": 1, "batchmean": 2}
+        if reduction not in reduction_tags:
+            raise NotImplementedError(
+                "kl_div currently supports sum, mean, and batchmean reduction"
+            )
+
+        physical_dims = self._physical_dims(dims)
+        callee = self.world.annex(torch_dialect.loss.kl_div_reduced.value)
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee,
+            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple(
+                [
+                    self.world.lit_bool(log_target),
+                    self._lit_nat(reduction_tags[reduction]),
+                ]
+            ),
+        )
+        result = self.world.app(callee, self.world.tuple([input, target]))
+        return self._remember_shape(result, [])
+
+    def triplet_margin_reduced(
+        self,
+        anchor,
+        positive,
+        negative,
+        margin=1.0,
+        p=2.0,
+        eps=1e-6,
+        swap=False,
+        reduction="mean",
+    ):
+        """Map rank-2 TripletMarginLoss; all formulas and branches stay in MimIR."""
+        dims = self.shape_of(anchor)
+        if len(dims) != 2 or len(self._physical_dims(dims)) != 2:
+            raise NotImplementedError(
+                "triplet_margin_loss currently requires physical rank 2"
+            )
+        for name, value in (("positive", positive), ("negative", negative)):
+            if not self.rules.same_shape(dims, self.shape_of(value)):
+                raise ValueError(
+                    f"triplet_margin_loss {name} must match anchor shape"
+                )
+        if not all(isinstance(value, (int, float)) for value in (margin, p, eps)):
+            raise NotImplementedError(
+                "dynamic triplet margin, p, and eps are not implemented"
+            )
+        if not isinstance(swap, bool):
+            raise NotImplementedError("dynamic triplet swap is not implemented")
+        reduction_tags = {"sum": 0, "mean": 1}
+        if reduction not in reduction_tags:
+            raise NotImplementedError(
+                "triplet_margin_loss currently supports sum and mean reduction"
+            )
+
+        physical_dims = self._physical_dims(dims)
+        callee = self.world.annex(torch_dialect.loss.triplet_margin_reduced.value)
+        callee = self.world.app(
+            callee, self._torch_semantics(anchor, floating=True)
+        )
+        callee = self._apply_grouped(callee, physical_dims)
+        callee = self.world.app(
+            callee,
+            self.world.tuple(
+                [
+                    self._f32_float_lit(float(margin)),
+                    self._f32_float_lit(float(p)),
+                    self._f32_float_lit(float(eps)),
+                    self.world.lit_bool(swap),
+                    self._lit_nat(reduction_tags[reduction]),
+                ]
+            ),
+        )
+        result = self.world.app(
+            callee, self.world.tuple([anchor, positive, negative])
+        )
         return self._remember_shape(result, [])
 
 
@@ -2350,9 +2460,58 @@ class OperatorLibrary:
         result = self.world.app(callee, x)
         return self._remember_shape(result, list(shape))
 
-    def convolution(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    def convolution(
+        self,
+        x,
+        weight,
+        bias=None,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        transposed=False,
+        output_padding=0,
+    ):
         semantic_in_dims = self.shape_of(x)
         weight_dims = self.shape_of(weight)
+        if transposed:
+            if len(semantic_in_dims) == 3 and len(weight_dims) == 3:
+                return self.convolution_transpose1d(
+                    x,
+                    weight,
+                    bias=bias,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=output_padding,
+                    dilation=dilation,
+                    groups=groups,
+                )
+            if len(semantic_in_dims) == 4 and len(weight_dims) == 4:
+                return self.convolution_transpose2d(
+                    x,
+                    weight,
+                    bias=bias,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=output_padding,
+                    dilation=dilation,
+                    groups=groups,
+                )
+            if len(semantic_in_dims) == 5 and len(weight_dims) == 5:
+                return self.convolution_transpose3d(
+                    x,
+                    weight,
+                    bias=bias,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=output_padding,
+                    dilation=dilation,
+                    groups=groups,
+                )
+            raise NotImplementedError(
+                "transposed convolution currently supports rank-3 NCL and "
+                "rank-4 NCHW, and rank-5 NCDHW inputs"
+            )
         if len(semantic_in_dims) == 3 and len(weight_dims) == 3:
             return self.convolution1d(
                 x,
@@ -2363,8 +2522,21 @@ class OperatorLibrary:
                 dilation=dilation,
                 groups=groups,
             )
+        if len(semantic_in_dims) == 5 and len(weight_dims) == 5:
+            return self.convolution3d(
+                x,
+                weight,
+                bias=bias,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            )
         if len(semantic_in_dims) != 4 or len(weight_dims) != 4:
-            raise NotImplementedError("aten.convolution currently supports rank-3 NCL and rank-4 NCHW inputs")
+            raise NotImplementedError(
+                "aten.convolution currently supports rank-3 NCL, rank-4 NCHW, "
+                "and rank-5 NCDHW inputs"
+            )
 
         type_in_dims = self._shape_dims(x)
         if len(type_in_dims) == 3 and self._is_lit_nat_value(semantic_in_dims[0], 1):
@@ -2394,6 +2566,273 @@ class OperatorLibrary:
                 self.world.tuple([self._to_nat(dilation[0]), self._to_nat(dilation[1])]),
                 self.world.lit_bool(False),
                 self.world.tuple([self._lit_nat(0), self._lit_nat(0)]),
+                self._to_nat(groups),
+            ],
+        )
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
+
+    def convolution_transpose2d(
+        self,
+        x,
+        weight,
+        bias=None,
+        stride=1,
+        padding=0,
+        output_padding=0,
+        groups=1,
+        dilation=1,
+    ):
+        in_dims = self.shape_of(x)
+        weight_dims = self.shape_of(weight)
+        stride = self._pair(stride, "stride")
+        padding = self._pair(padding, "padding")
+        dilation = self._pair(dilation, "dilation")
+        output_padding = self._pair(output_padding, "output_padding")
+        n, cin, height, width = in_dims
+        weight_cin, cout_per_group, kh, kw = weight_dims
+        cout = self._nat_binop(core.nat.mul, cout_per_group, groups)
+
+        def output_dim(size, kernel, step, dil, pad, out_pad):
+            expanded = self._nat_binop(
+                core.nat.mul, self._nat_binop(core.nat.sub, size, 1), step
+            )
+            kernel_span = self._nat_binop(
+                core.nat.mul, dil, self._nat_binop(core.nat.sub, kernel, 1)
+            )
+            padded = self._nat_binop(
+                core.nat.sub,
+                self._nat_binop(core.nat.add, expanded, kernel_span),
+                self._nat_binop(core.nat.mul, 2, pad),
+            )
+            return self._nat_binop(
+                core.nat.add,
+                padded,
+                self._nat_binop(core.nat.add, out_pad, 1),
+            )
+
+        out_spatial = [
+            output_dim(size, kernel, step, dil, pad, out_pad)
+            for size, kernel, step, dil, pad, out_pad in zip(
+                (height, width),
+                (kh, kw),
+                stride,
+                dilation,
+                padding,
+                output_padding,
+            )
+        ]
+        out_dims = [n, cout, *out_spatial]
+        callee = self.world.annex(torch_dialect.conv.transpose2d.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee,
+            [n, cin, cout, cout_per_group, height, width, kh, kw],
+        )
+        pairs = [
+            self.world.tuple([self._to_nat(value) for value in values])
+            for values in (stride, padding, dilation, output_padding)
+        ]
+        callee = self._apply_grouped(callee, [*pairs, self._to_nat(groups)])
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
+
+    def convolution_transpose1d(
+        self,
+        x,
+        weight,
+        bias=None,
+        stride=1,
+        padding=0,
+        output_padding=0,
+        groups=1,
+        dilation=1,
+    ):
+        n, cin, length = self.shape_of(x)
+        weight_cin, cout_per_group, kernel = self.shape_of(weight)
+        stride = self._single(stride, "stride")
+        padding = self._single(padding, "padding")
+        dilation = self._single(dilation, "dilation")
+        output_padding = self._single(output_padding, "output_padding")
+        cout = self._nat_binop(core.nat.mul, cout_per_group, groups)
+        expanded = self._nat_binop(
+            core.nat.mul, self._nat_binop(core.nat.sub, length, 1), stride
+        )
+        kernel_span = self._nat_binop(
+            core.nat.mul,
+            dilation,
+            self._nat_binop(core.nat.sub, kernel, 1),
+        )
+        padded = self._nat_binop(
+            core.nat.sub,
+            self._nat_binop(core.nat.add, expanded, kernel_span),
+            self._nat_binop(core.nat.mul, 2, padding),
+        )
+        out_length = self._nat_binop(
+            core.nat.add,
+            padded,
+            self._nat_binop(core.nat.add, output_padding, 1),
+        )
+        out_dims = [n, cout, out_length]
+        callee = self.world.annex(torch_dialect.conv.transpose1d.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee, [n, cin, cout, cout_per_group, length, kernel]
+        )
+        callee = self._apply_grouped(
+            callee,
+            [
+                self._to_nat(stride),
+                self._to_nat(padding),
+                self._to_nat(dilation),
+                self._to_nat(output_padding),
+                self._to_nat(groups),
+            ],
+        )
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
+
+    def convolution_transpose3d(
+        self,
+        x,
+        weight,
+        bias=None,
+        stride=1,
+        padding=0,
+        output_padding=0,
+        groups=1,
+        dilation=1,
+    ):
+        n, cin, depth, height, width = self.shape_of(x)
+        weight_cin, cout_per_group, kd, kh, kw = self.shape_of(weight)
+        stride = self._triple(stride, "stride")
+        padding = self._triple(padding, "padding")
+        dilation = self._triple(dilation, "dilation")
+        output_padding = self._triple(output_padding, "output_padding")
+        cout = self._nat_binop(core.nat.mul, cout_per_group, groups)
+
+        def output_dim(size, kernel, step, dil, pad, out_pad):
+            expanded = self._nat_binop(
+                core.nat.mul, self._nat_binop(core.nat.sub, size, 1), step
+            )
+            kernel_span = self._nat_binop(
+                core.nat.mul, dil, self._nat_binop(core.nat.sub, kernel, 1)
+            )
+            padded = self._nat_binop(
+                core.nat.sub,
+                self._nat_binop(core.nat.add, expanded, kernel_span),
+                self._nat_binop(core.nat.mul, 2, pad),
+            )
+            return self._nat_binop(
+                core.nat.add,
+                padded,
+                self._nat_binop(core.nat.add, out_pad, 1),
+            )
+
+        out_spatial = [
+            output_dim(size, kernel, step, dil, pad, out_pad)
+            for size, kernel, step, dil, pad, out_pad in zip(
+                (depth, height, width),
+                (kd, kh, kw),
+                stride,
+                dilation,
+                padding,
+                output_padding,
+            )
+        ]
+        out_dims = [n, cout, *out_spatial]
+        callee = self.world.annex(torch_dialect.conv.transpose3d.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee,
+            [n, cin, cout, cout_per_group, depth, height, width, kd, kh, kw],
+        )
+        triples = [
+            self.world.tuple([self._to_nat(value) for value in values])
+            for values in (stride, padding, dilation, output_padding)
+        ]
+        callee = self._apply_grouped(callee, [*triples, self._to_nat(groups)])
+        if bias is None:
+            bias_type = self.world.arr(cout, self._tensor_element_type(x))
+            optional_bias = self.world.app(
+                self.world.annex(option.none.value), bias_type
+            )
+        else:
+            optional_bias = self.world.implicit_app(
+                self.world.annex(option.some.value), bias
+            )
+        result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
+        return self._remember_shape(result, out_dims)
+
+    def convolution3d(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        semantic_in_dims = self.shape_of(x)
+        weight_dims = self.shape_of(weight)
+        type_in_dims = self._shape_dims(x)
+        if len(type_in_dims) == 4 and self._is_lit_nat_value(semantic_in_dims[0], 1):
+            in_dims = [semantic_in_dims[0], *type_in_dims]
+        else:
+            in_dims = semantic_in_dims
+
+        stride = self._triple(stride, "stride")
+        padding = self._triple(padding, "padding")
+        dilation = self._triple(dilation, "dilation")
+        n, cin, depth, height, width = in_dims
+        cout, cin_per_group, kd, kh, kw = weight_dims
+        out_spatial = [
+            self._conv2d_dim(size, kernel, step, dil, pad)
+            for size, kernel, step, dil, pad in zip(
+                (depth, height, width),
+                (kd, kh, kw),
+                stride,
+                dilation,
+                padding,
+            )
+        ]
+        out_dims = [n, cout, *out_spatial]
+
+        callee = self.world.annex(torch_dialect.conv.conv3d.value)
+        callee = self.world.app(callee, self._torch_semantics(x))
+        callee = self._apply_grouped(
+            callee,
+            [n, cin, cout, cin_per_group, depth, height, width, kd, kh, kw],
+        )
+        triples = [
+            self.world.tuple([self._to_nat(value) for value in values])
+            for values in (stride, padding, dilation)
+        ]
+        callee = self._apply_grouped(
+            callee,
+            [
+                *triples,
+                self.world.lit_bool(False),
+                self.world.tuple([self._lit_nat(0)] * 3),
                 self._to_nat(groups),
             ],
         )
@@ -2986,7 +3425,7 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple([input, prepend]))
         return self._remember_shape(result, output_dims)
 
-    def cumsum(self, input, dim, *, dtype=None):
+    def cumsum(self, input, dim, *, dtype=None, reverse=False):
         elem_type = self._tensor_element_type(input)
         boolean_input = elem_type == self.Bool
         if boolean_input:
@@ -3016,6 +3455,10 @@ class OperatorLibrary:
             return input
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_dim = physical_axes.index(canonical_dim)
+        if reverse and (boolean_input or len(physical_dims) != 2):
+            raise NotImplementedError(
+                "reverse cumsum currently requires a rank-2 floating tensor"
+            )
         if boolean_input and len(physical_dims) == 1:
             callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64_1d.value)
             callee = self.world.app(callee, physical_dims[0])
@@ -3028,9 +3471,13 @@ class OperatorLibrary:
             callee = self.world.app(callee, self.world.lit_i64(physical_dim))
         else:
             op = (
-                torch_dialect.scan.cumsum_2d
-                if len(physical_dims) == 2
-                else torch_dialect.scan.cumsum
+                torch_dialect.scan.cumsum_2d_direction
+                if reverse
+                else (
+                    torch_dialect.scan.cumsum_2d
+                    if len(physical_dims) == 2
+                    else torch_dialect.scan.cumsum
+                )
             )
             callee = self.world.annex(op.value)
             callee = self.world.app(
@@ -3046,9 +3493,20 @@ class OperatorLibrary:
                         self.world.tuple(physical_dims),
                     ],
                 )
-            callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+            if reverse:
+                callee = self.world.app(
+                    callee,
+                    self.world.tuple(
+                        [self.world.lit_i64(physical_dim), self.world.lit_tt()]
+                    ),
+                )
+            else:
+                callee = self.world.app(callee, self.world.lit_i64(physical_dim))
         result = self.world.app(callee, input)
-        return self._remember_shape(result, dims)
+        result = self._remember_shape(result, dims)
+        if not reverse:
+            self._cumsum_provenance[result] = (input, canonical_dim, dtype)
+        return result
 
     def cumprod(self, input, dim, *, dtype=None):
         if dtype is not None:

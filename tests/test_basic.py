@@ -935,6 +935,21 @@ def test_floating_cumsum_maps_to_torch_semantics():
     assert "%torch.scan.cumsum_2d" in def_to_string(result)
 
 
+def test_reverse_cumsum_pattern_maps_to_directional_scan():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.cumsum(torch.flip(x, (1,)), dim=1).flip((1,))
+
+    world = make_world()
+    (x,) = make_static_inputs_with_shapes(world, [(3, 5)])
+    result = translate_model(Model(), [x])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [3, 5]
+    assert "%torch.scan.cumsum_2d_direction" in ir
+    assert "%torch.indexing.flip" not in ir
+
+
 def test_tensor_select_method_maps_to_torch_semantics():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -1015,6 +1030,96 @@ def test_functional_conv2d_translates_to_convolution():
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
     assert "%torch.conv.general" in def_to_string(result)
+
+
+def test_functional_conv3d_translates_to_torch_convolution3d():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.nn.functional.conv3d(
+                x,
+                weight,
+                bias,
+                stride=(2, 2, 2),
+                padding=(1, 0, 2),
+                dilation=(1, 2, 1),
+                groups=2,
+            )
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 7, 9, 11), (8, 2, 3, 2, 5), (8,)]
+    )
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 8, 4, 4, 6]
+    assert "%torch.conv.conv3d" in def_to_string(result)
+
+
+def test_aten_convolution_transpose2d_maps_all_static_parameters():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.convolution.default(
+                x,
+                weight,
+                bias,
+                [2, 3],
+                [1, 0],
+                [1, 2],
+                True,
+                [1, 2],
+                2,
+            )
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 3, 4), (4, 3, 3, 2), (6,)]
+    )
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 6, 6, 14]
+    assert "%torch.conv.transpose2d" in def_to_string(result)
+
+
+def test_aten_convolution_transpose1d_maps_all_static_parameters():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.convolution.default(
+                x, weight, bias, [2], [1], [2], True, [1], 2
+            )
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 5), (4, 3, 3), (6,)]
+    )
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 6, 12]
+    assert "%torch.conv.transpose1d" in def_to_string(result)
+
+
+def test_aten_convolution_transpose3d_maps_unit_stride_parameters():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.convolution.default(
+                x,
+                weight,
+                bias,
+                [1, 1, 1],
+                [1, 0, 1],
+                [1, 2, 1],
+                True,
+                [0, 0, 0],
+                2,
+            )
+
+    world = make_world()
+    x, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 3, 4, 5), (4, 3, 3, 2, 4), (6,)]
+    )
+    result = translate_model(Model(), [x, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 6, 3, 6, 6]
+    assert "%torch.conv.transpose3d" in def_to_string(result)
 
 
 def test_functional_depthwise_conv2d_translates_to_grouped_convolution():
@@ -1148,6 +1253,52 @@ def test_smooth_l1_mean_maps_directly_to_torch_semantics():
 
     assert tensor_shape_values(result) == []
     assert "%torch.loss.smooth_l1_mean" in def_to_string(result)
+
+
+@pytest.mark.parametrize(
+    ("reduction", "log_target"),
+    [("sum", False), ("mean", True), ("batchmean", False)],
+)
+def test_kl_div_reductions_map_directly_to_torch_semantics(
+    reduction, log_target
+):
+    class Model(torch.nn.Module):
+        def forward(self, input, target):
+            return torch.nn.functional.kl_div(
+                input, target, reduction=reduction, log_target=log_target
+            )
+
+    world = make_world()
+    input, target = make_static_inputs_with_shapes(world, [(3, 5), (3, 5)])
+    result = translate_model(Model(), [input, target])
+
+    assert tensor_shape_values(result) == []
+    assert "%torch.loss.kl_div_reduced" in def_to_string(result)
+
+
+@pytest.mark.parametrize(
+    ("reduction", "swap"), [("mean", False), ("sum", True)]
+)
+def test_triplet_margin_loss_maps_directly_to_torch_semantics(reduction, swap):
+    class Model(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor,
+                positive,
+                negative,
+                margin=0.75,
+                p=2.0,
+                eps=1e-6,
+                swap=swap,
+                reduction=reduction,
+            )
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(world, [(3, 5)] * 3)
+    result = translate_model(Model(), inputs)
+
+    assert tensor_shape_values(result) == []
+    assert "%torch.loss.triplet_margin_reduced" in def_to_string(result)
 
 
 def test_inplace_residual_add_and_relu_translate_as_values():
