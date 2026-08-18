@@ -701,6 +701,19 @@ def test_rank4_matmul_maps_directly_to_torch_matmul():
     assert "%torch.linalg.matmul" in def_to_string(result)
 
 
+def test_einsum_tensor_matrix_contraction_maps_to_torch_matmul():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.einsum("bijl,lk->bijk", lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(world, [(2, 3, 4, 5), (5, 7)])
+    result = translate_model(Model(), [lhs, rhs])
+
+    assert tensor_shape_values(result) == [2, 3, 4, 7]
+    assert "%torch.linalg.matmul" in def_to_string(result)
+
+
 def test_bmm_maps_directly_to_torch_bmm():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):

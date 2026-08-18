@@ -319,6 +319,7 @@ class FXGraphTranslator:
         m[torch.mm] = self._wrap_binary(self.ops.mm)
         m[torch.bmm] = self._wrap_binary(self.ops.bmm)
         m[torch.matmul] = self._wrap_binary(self.ops.matmul)
+        m[torch.einsum] = self._wrap_einsum()
         m[operator.matmul] = self._wrap_binary(self.ops.matmul)
         m["aten.mm.default"] = self._wrap_binary(self.ops.mm)
         m["aten.bmm.default"] = self._wrap_binary(self.ops.bmm)
@@ -465,6 +466,53 @@ class FXGraphTranslator:
             return self.ops.addmm(
                 self_tensor, mat1, mat2, beta=beta, alpha=alpha
             )
+        return convert
+
+    def _wrap_einsum(self):
+        """Map statically recognizable tensor-matrix contractions to matmul.
+
+        PyTorch API: https://pytorch.org/docs/stable/generated/torch.einsum.html
+        The equation is compile-time API syntax; numerical semantics remain in
+        `%torch.linalg.matmul` and its MimIR decomposition.
+        """
+
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            equation = args[0]
+            operands = args[1:]
+            if len(operands) == 1 and isinstance(operands[0], (list, tuple)):
+                operands = operands[0]
+            if not isinstance(equation, str) or len(operands) != 2:
+                raise NotImplementedError(
+                    "einsum currently requires a static equation and two operands"
+                )
+
+            equation = "".join(equation.split())
+            if "->" not in equation:
+                raise NotImplementedError(
+                    "einsum currently requires an explicit output equation"
+                )
+            inputs, output = equation.split("->", 1)
+            labels = inputs.split(",")
+            if len(labels) != 2:
+                raise NotImplementedError("einsum currently supports two operands")
+            lhs_labels, rhs_labels = labels
+            is_tensor_matrix = (
+                lhs_labels
+                and len(rhs_labels) == 2
+                and len(set(lhs_labels)) == len(lhs_labels)
+                and len(set(rhs_labels)) == 2
+                and lhs_labels[-1] == rhs_labels[0]
+                and rhs_labels[0] not in lhs_labels[:-1]
+                and rhs_labels[1] not in lhs_labels[:-1]
+                and output == lhs_labels[:-1] + rhs_labels[1]
+            )
+            if not is_tensor_matrix:
+                raise NotImplementedError(
+                    f"einsum equation {equation!r} is not a tensor-matrix contraction"
+                )
+            return self.ops.matmul(operands[0], operands[1])
+
         return convert
 
     def _wrap_linear(self):
