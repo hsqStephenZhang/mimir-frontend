@@ -13,14 +13,14 @@ result is:
 
 | Status | Cases | Rate |
 | --- | ---: | ---: |
-| PASS | 93 | 93.0% of the corpus |
-| FAIL | 4 | 4.0% |
+| PASS | 94 | 94.0% of the corpus |
+| FAIL | 3 | 3.0% |
 | INVALID | 3 | 3.0% |
 | TIMEOUT | 0 | 0.0% |
 
 Excluding fixtures that fail in PyTorch eager before MimIR is invoked, the
-compiler pass rate is **93/97 (95.9%)**. This improves the preceding baseline
-from 70/100 by 23 passing cases.
+compiler pass rate is **94/97 (96.9%)**. This improves the preceding baseline
+from 70/100 by 24 passing cases.
 
 ## Implemented In This Increment
 
@@ -32,6 +32,9 @@ from 70/100 by 23 passing cases.
   `(output, mean, rstd)` result schema, validates the redundant `N`, `C`, and
   `HxW` arguments, and decomposes normalization and optional channel affine
   parameters into tensor operations.
+- `%torch.pool.max_pool2d_with_indices` returns both pooled values and PyTorch's
+  flattened spatial indices. Its index reduction preserves first-index ties,
+  excludes implicit padding, and handles dilation and ceil-mode windows.
 - The frontend now maps `torch.multiply` and tensor `detach` aliases directly.
 - `torch.min(tensor, tensor)` is dispatched to binary minimum instead of being
   misinterpreted as the value-and-index reduction overload.
@@ -43,7 +46,6 @@ and the complete Level 2 corpus validate these changes.
 
 - 2 cases: rank-zero tensor graph inputs are rejected by the frontend/backend
   boundary.
-- 1 case: `max_pool2d_with_indices` needs its tuple result and index semantics.
 - 1 case: the fixture triggers a Dynamo graph break in `_warnings.warn` before
   the MimIR backend is called.
 

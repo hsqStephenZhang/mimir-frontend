@@ -669,8 +669,6 @@ class FXGraphTranslator:
 
     def _wrap_max_pool2d(self, return_indices: bool = False):
         def convert(node: fx.Node):
-            if return_indices:
-                raise NotImplementedError("max_pool2d_with_indices tuple result is not implemented")
             args = self.retrieve_args(node)
             x = args[0]
             kernel_size = args[1] if len(args) > 1 else node.kwargs.get("kernel_size")

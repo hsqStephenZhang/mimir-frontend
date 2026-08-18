@@ -3069,12 +3069,11 @@ class OperatorLibrary:
         return result
 
     def max_pool2d(self, x, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
-        if return_indices:
-            raise NotImplementedError("max_pool2d return_indices=True is not implemented")
-
         in_dims = self.shape_of(x)
         if len(in_dims) != 4:
-            raise NotImplementedError("max_pool2d currently supports 4D NCHW inputs only")
+            raise NotImplementedError(
+                f"max_pool2d currently supports 4D NCHW inputs only, got {in_dims}"
+            )
         kernel = self._pair(kernel_size, "kernel_size")
         if stride is None:
             stride = kernel
@@ -3087,7 +3086,12 @@ class OperatorLibrary:
             self._pool2d_dim(h, kernel[0], stride[0], dilation[0], padding[0], ceil_mode),
             self._pool2d_dim(w, kernel[1], stride[1], dilation[1], padding[1], ceil_mode),
         ]
-        callee = self.world.annex(torch_dialect.pool.max_pool2d.value)
+        operator = (
+            torch_dialect.pool.max_pool2d_with_indices
+            if return_indices
+            else torch_dialect.pool.max_pool2d
+        )
+        callee = self.world.annex(operator.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, h, w])
         callee = self._apply_grouped(
@@ -3101,7 +3105,12 @@ class OperatorLibrary:
             ],
         )
         result = self.world.app(callee, x)
-        return self._remember_shape(result, [n, c, *out_spatial])
+        out_dims = [n, c, *out_spatial]
+        if return_indices:
+            self._remember_shape(result.proj(2, 0), out_dims)
+            self._remember_shape(result.proj(2, 1), out_dims)
+            return result
+        return self._remember_shape(result, out_dims)
 
     def max_pool1d(
         self, x, kernel_size, stride=None, padding=0, dilation=1,

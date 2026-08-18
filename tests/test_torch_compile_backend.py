@@ -523,6 +523,26 @@ def test_native_group_norm_tuple_matches_eager():
     )
 
 
+@pytest.mark.parametrize("result_index", [0, 1])
+def test_max_pool2d_with_indices_results_match_eager(result_index):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            result = torch.ops.aten.max_pool2d_with_indices.default(
+                x, [2, 3], [2, 2], [1, 1], [1, 1], True
+            )
+            return result[result_index]
+
+    # Repeated extrema exercise PyTorch's first-index tie breaking. Negative
+    # infinity also distinguishes real input cells from implicit padding.
+    x = torch.tensor(
+        [[[[float("-inf"), 4.0, 4.0, 1.0, 2.0],
+           [3.0, 4.0, 0.0, 2.0, 2.0],
+           [5.0, 1.0, 6.0, 6.0, 0.0],
+           [5.0, 3.0, 6.0, 2.0, 1.0]]]]
+    )
+    check_against_eager(Model(), x)
+
+
 def test_hardtanh_matches_boundaries_and_preserves_nan():
     class Model(torch.nn.Module):
         def forward(self, x):

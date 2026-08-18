@@ -1904,6 +1904,19 @@ def test_max_pool2d_ceil_mode_shape():
     assert "%torch.pool.max_pool2d" in def_to_string(result)
 
 
+def test_max_pool2d_with_indices_maps_complete_tuple_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.ops.aten.max_pool2d_with_indices.default(
+                x, [2, 3], [2, 2], [1, 1], [1, 1], True
+            )
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 3, 4, 5)])[0]
+    result = translate_model(Model(), [x])
+    assert "%torch.pool.max_pool2d_with_indices" in def_to_string(result)
+
+
 def test_max_pool1d_reuses_torch_pool_semantics():
     class Model(torch.nn.Module):
         def forward(self, x):
