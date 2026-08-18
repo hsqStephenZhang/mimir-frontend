@@ -360,7 +360,10 @@ def mimir_backend(
             raise ValueError("max_fp_iters must be positive")
 
     _check_tensors(
-        example_inputs, "input", allowed_dtypes=(torch.float32, torch.int64)
+        example_inputs,
+        "input",
+        allowed_dtypes=(torch.float32, torch.int64),
+        allow_scalar=True,
     )
     if any(n.op == "get_attr" for n in gm.graph.nodes):
         # Dynamo lifts parameters, buffers, and tensor constants into

@@ -543,6 +543,16 @@ def test_max_pool2d_with_indices_results_match_eager(result_index):
     check_against_eager(Model(), x)
 
 
+def test_rank_zero_tensor_input_broadcast_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x, scale):
+            return torch.minimum(x * scale, scale) - scale
+
+    check_against_eager(
+        Model(), torch.tensor([[-2.0, 0.5], [3.0, 4.0]]), torch.tensor(1.5)
+    )
+
+
 def test_hardtanh_matches_boundaries_and_preserves_nan():
     class Model(torch.nn.Module):
         def forward(self, x):
