@@ -36,8 +36,16 @@ Two complete-weight architecture baselines were executed:
 
 | Model | Result | First blocking stage |
 | --- | --- | --- |
-| GPT-2, batch 1, sequence 1023 | FAIL | Backend graph construction: `cat dimension is out of range`. |
-| Electra-small, batch 1, sequence 511 | FAIL | Tensor dtype dispatch: an F32 unary predicate is applied to I64 input. |
+| GPT-2, batch 1, sequence 1023 | FAIL | Memory optimization: `%mem.seo` does not converge within 128 iterations. |
+| Electra-small, batch 1, sequence 511 | FAIL | Memory optimization: `%mem.seo` does not converge within 512 iterations. |
+
+The earlier semantic blockers have been fixed. GPT-2's `(0,)` KV-cache
+concatenation now observes PyTorch's cross-rank empty identity rule, and
+Electra's I64 scalar comparisons resolve to integer Torch semantics. Both
+graphs now fully leave the Torch dialect before reaching the common memory
+optimizer failure. A GPT-2 profile recorded 736 Torch decompositions,
+including 236 reshapes, 64 expands, 48 `addmm`s, 24 `bmm`s, and 25 native layer
+normalizations.
 
 The full 20-case serial run was also started. It blocked while acquiring the
 first GPT-Neo 2.7B weights, with no local cache progress, and was terminated
@@ -49,7 +57,8 @@ Current Level 4 conclusions are architectural, not a coverage percentage:
 
 - pretrained loading and eager execution work for the two downloaded models;
 - transformer graphs reach the MimIR backend;
-- integer tensor semantics and output/concatenation shape handling fail before
-  the existing operator coverage can be evaluated end to end;
+- both downloaded graphs pass frontend mapping and Torch-to-tensor
+  decomposition; the next shared blocker is `%mem.seo` convergence on the
+  generated large control/data-flow graph;
 - the remaining five model families need their weights available before a
   valid 20-case pass rate can be reported.

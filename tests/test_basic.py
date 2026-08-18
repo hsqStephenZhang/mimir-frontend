@@ -1968,6 +1968,45 @@ def test_cat_accepts_folded_singleton_concat_extent():
     assert "%torch.shape.cat" in def_to_string(result)
 
 
+def test_cat_ignores_one_dimensional_empty_identity_across_ranks():
+    """PyTorch permits a `(0,)` tensor in an otherwise higher-rank cat."""
+
+    class Model(torch.nn.Module):
+        def forward(self, empty, values):
+            return torch.cat((empty, values), dim=-2)
+
+    world = make_world()
+    empty, values = make_static_inputs_with_shapes(world, [(0,), (1, 12, 7, 64)])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    translator.ops._remember_shape(empty, [world.lit_nat(0)])
+    translator.ops._remember_shape(
+        values, [world.lit_nat(dim) for dim in (1, 12, 7, 64)]
+    )
+    result = translator.translate(traced.graph, [empty, values])
+
+    assert result == values
+
+
+def test_cat_preserves_all_one_dimensional_empty_inputs():
+    class Model(torch.nn.Module):
+        def forward(self, first, second):
+            return torch.cat((first, second), dim=0)
+
+    world = make_world()
+    first, second = make_static_inputs_with_shapes(world, [(0,), (0,)])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    translator.ops._remember_shape(first, [world.lit_nat(0)])
+    translator.ops._remember_shape(second, [world.lit_nat(0)])
+    result = translator.translate(traced.graph, [first, second])
+
+    result_dims = translator.ops.shape_of(result)
+    assert len(result_dims) == 1
+    assert isinstance(result_dims[0], mim.Lit) and result_dims[0].get_nat() == 0
+    assert "%torch.shape.cat" in def_to_string(result)
+
+
 def test_avg_pool2d_translates_to_torch_pool_with_full_parameters():
     class Model(torch.nn.Module):
         def forward(self, x):
@@ -2665,4 +2704,5 @@ def test_clone_copy_operator():
     world = make_world()
     x_input, = make_inputs(world, 1, "static", 3)
     result = translate_model(Model(), [x_input])
-    assert result == x_input # identity
+    assert tensor_shape_values(result) == tensor_shape_values(x_input)
+    assert "%torch.creation.clone" in def_to_string(result)

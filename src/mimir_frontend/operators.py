@@ -4083,10 +4083,24 @@ class OperatorLibrary:
         Translates to `%torch.shape.cat`.
 
         A one-element concatenation is the identity and is eliminated eagerly.
+        PyTorch also treats a one-dimensional empty tensor as a concatenation
+        identity, even when the other inputs have a different rank. Eliminate
+        that statically decidable special case before forming the uniformly
+        ranked `%torch.shape.cat` input tuple.
         """
         if isinstance(tensors, mim.Tuple):
             num_inputs = tensors.num_projs()
             tensors = [tensors.proj(num_inputs, i) for i in range(num_inputs)]
+
+        input_dims_list = [self.shape_of(t) for t in tensors]
+        ordinary = [
+            (tensor, dims)
+            for tensor, dims in zip(tensors, input_dims_list)
+            if not (len(dims) == 1 and self._is_lit_nat_value(dims[0], 0))
+        ]
+        if ordinary:
+            tensors = [tensor for tensor, _ in ordinary]
+            input_dims_list = [dims for _, dims in ordinary]
 
         num_inputs = len(tensors)
         if num_inputs == 1:
@@ -4094,10 +4108,6 @@ class OperatorLibrary:
         first_tensor = tensors[0]
         elem_t = self._tensor_element_type(first_tensor)
 
-        input_dims_list = []
-        for t in tensors:
-            input_dims = self.shape_of(t)
-            input_dims_list.append(input_dims)
         logical_rank = len(input_dims_list[0])
         if dim < 0:
             dim += logical_rank
@@ -4280,5 +4290,14 @@ class OperatorLibrary:
         result = self.squeeze(sliced, dim)
         return self._remember_shape(result, self.rules.select_shape(self.shape_of(x), dim))
 
-    def clone(self, x): return x
+    def clone(self, x):
+        """Translate `aten.clone` to its materializing Torch semantics."""
+        dims = self.shape_of(x)
+        callee = self.world.annex(torch_dialect.creation.clone.value)
+        callee = self._apply_grouped(
+            callee,
+            [self._tensor_element_type(x), self._lit_nat(len(dims)), self.world.tuple(dims)],
+        )
+        return self._remember_shape(self.world.app(callee, x), dims)
+
     def copy(self, x): return x

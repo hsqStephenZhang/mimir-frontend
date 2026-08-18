@@ -291,12 +291,20 @@ def _pack_outputs(gm: fx.GraphModule, out_shapes: list[tuple[int, ...]]) -> None
     Dynamo graphs return a container of tensors. To keep the verified
     single-`float*` return ABI, flatten every output and concatenate them:
     `output((a, b))` becomes `output(cat([reshape(a, (n_a,)), reshape(b, (n_b,))]))`.
-    A single output is simply unwrapped from its container.
+    A single output is cloned to preserve the owned-pointer ABI even when PE
+    otherwise reduces the graph to a borrowed input value.
     """
     output = next(n for n in gm.graph.nodes if n.op == "output")
     nodes = output.args[0]
     if len(nodes) == 1:
-        output.args = (nodes[0],)
+        if out_shapes[0]:
+            with gm.graph.inserting_before(output):
+                packed = gm.graph.call_function(
+                    torch.ops.aten.clone.default, (nodes[0],)
+                )
+            output.args = (packed,)
+        else:
+            output.args = (nodes[0],)
     else:
         with gm.graph.inserting_before(output):
             flats = [
@@ -477,13 +485,19 @@ def mimir_backend(
 
     fn = lib[name]
     scalar_input = [all(extent == 1 for extent in shape) for shape in input_shapes]
+    empty_input = [math.prod(shape) == 0 for shape in input_shapes]
     scalar_ctypes = {
         torch.float32: ctypes.c_float,
         torch.int64: ctypes.c_int64,
     }
     fn.argtypes = [
         scalar_ctypes[dtype] if is_scalar else ctypes.c_void_p
-        for dtype, is_scalar in zip(input_dtypes, scalar_input, strict=True)
+        for dtype, is_scalar, is_empty in zip(
+            input_dtypes, scalar_input, empty_input, strict=True
+        )
+        # A zero-length MimIR array normalizes to Unit and therefore occupies
+        # no slot in the emitted native function signature.
+        if not is_empty
     ]
     output_ctype = scalar_ctypes[output_dtype]
     fn.restype = output_ctype if scalar_output else ctypes.POINTER(output_ctype)
@@ -493,9 +507,10 @@ def mimir_backend(
         buffers = [a.detach().contiguous() for a in args]
         native_args = [
             scalar_ctypes[dtype](buffer.item()) if is_scalar else buffer.data_ptr()
-            for buffer, dtype, is_scalar in zip(
-                buffers, input_dtypes, scalar_input, strict=True
+            for buffer, dtype, is_scalar, is_empty in zip(
+                buffers, input_dtypes, scalar_input, empty_input, strict=True
             )
+            if not is_empty
         ]
         native_result = fn(*native_args)
         if scalar_output:
@@ -505,7 +520,18 @@ def mimir_backend(
                 native_result, ctypes.POINTER(output_ctype * total_numel)
             ).contents
             flat = torch.frombuffer(array, dtype=output_dtype).clone()
-            _LIBC.free(ctypes.cast(native_result, ctypes.c_void_p))
+            result_address = ctypes.cast(native_result, ctypes.c_void_p).value
+            input_addresses = {
+                buffer.data_ptr()
+                for buffer, is_scalar, is_empty in zip(
+                    buffers, scalar_input, empty_input, strict=True
+                )
+                if not is_scalar and not is_empty
+            }
+            # PE can reduce identity-like graphs to a borrowed input pointer.
+            # Only buffers allocated by the generated function belong to libc.
+            if result_address not in input_addresses:
+                _LIBC.free(ctypes.cast(native_result, ctypes.c_void_p))
         # The outputs are disjoint views of one flat buffer.
         return restore(
             flat[offset : offset + numel].reshape(shape)

@@ -1320,3 +1320,31 @@ def test_debug_dir_dumps_artifacts(tmp_path):
     for suffix in ("_pre.mim", "_post.mim", ".ll", ".so"):
         matches = list(tmp_path.glob(f"mimir_graph_*{suffix}"))
         assert matches, f"expected a mimir_graph_*{suffix} artifact in {tmp_path}"
+
+
+def test_cat_one_dimensional_empty_identity_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, empty, values):
+            return torch.cat((empty, values), dim=-2)
+
+    model = Model()
+    empty = torch.empty(0)
+    values = torch.randn(1, 2, 3, 4)
+    with torch.no_grad():
+        got = torch.compile(model, backend="mimir", fullgraph=True)(empty, values)
+    torch.testing.assert_close(got, model(empty, values))
+
+
+def test_identity_output_does_not_free_input_storage():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x
+
+    model = Model()
+    x = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    expected = x.clone()
+    with torch.no_grad():
+        got = torch.compile(model, backend="mimir", fullgraph=True)(x)
+
+    torch.testing.assert_close(got, expected)
+    torch.testing.assert_close(x, expected)
