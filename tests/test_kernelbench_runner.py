@@ -96,3 +96,16 @@ def test_repository_discovers_all_level1_to_level3_models():
 
     assert len(cases) == 250
     assert sum(case["fixture"] == "yaml" for case in cases) >= 203
+
+
+def test_repository_discovers_level4_models_explicitly():
+    lighthouse = Path("/workspaces/ml-compiler/lighthouse")
+    if not lighthouse.exists():
+        return
+
+    cases = runner.discover_cases(
+        lighthouse, ("level4",), runner.DEFAULT_FIXTURES
+    )
+
+    assert len(cases) == 20
+    assert all(case["fixture"] == "native" for case in cases)

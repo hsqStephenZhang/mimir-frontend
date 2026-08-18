@@ -253,8 +253,19 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         default="ci",
-        choices=("ci", "level1", "level2", "level3", "registered", "full"),
-        help="full discovers all Level 1-3 sources; registered is kept as an alias",
+        choices=(
+            "ci",
+            "level1",
+            "level2",
+            "level3",
+            "level4",
+            "registered",
+            "full",
+        ),
+        help=(
+            "full discovers all Level 1-3 sources; level4 is explicit because "
+            "it loads full pretrained models; registered is kept as an alias"
+        ),
     )
     parser.add_argument("--kernel", help="only run cases whose path contains this text")
     parser.add_argument("--case", help=argparse.SUPPRESS)
