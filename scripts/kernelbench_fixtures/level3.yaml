@@ -12,6 +12,13 @@
   input_shapes: [1x8x16x16]
   initializations: [rnd]
 
+- kernel: level3/7_GoogleNetInceptionV1.py
+  scalable: false
+  max_fp_iters: 2048
+  init_args: [10]
+  input_shapes: [1x3x64x64]
+  initializations: [rnd]
+
 - kernel: level3/8_ResNetBasicBlock.py
   scalable: false
   init_args: [3, 8, 1]
@@ -35,6 +42,19 @@
   scalable: false
   init_args: [1000]
   input_shapes: [1x3x64x64]
+  initializations: [rnd]
+
+- kernel: level3/19_MobileNetV1.py
+  scalable: false
+  max_fp_iters: 2048
+  init_args: [10, 3, 0.125]
+  input_shapes: [1x3x224x224]
+  initializations: [rnd]
+
+- kernel: level3/21_EfficientNetMBConv.py
+  scalable: false
+  init_args: [8, 8, 3, 1, 2]
+  input_shapes: [1x8x16x16]
   initializations: [rnd]
 
 - kernel: level3/31_VisionAttention.py
