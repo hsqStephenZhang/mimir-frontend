@@ -1060,6 +1060,14 @@ def test_functional_normalize_matches_eager():
     check_against_eager(Normalize(), torch.randn(2, 4, 8))
 
 
+def test_rank0_log_matches_eager():
+    class RankZeroLog(torch.nn.Module):
+        def forward(self, x):
+            return torch.log(x)
+
+    check_against_eager(RankZeroLog(), torch.tensor(4.0))
+
+
 def test_bmm_matches_eager():
     class BatchedMatmul(torch.nn.Module):
         def forward(self, lhs, rhs):

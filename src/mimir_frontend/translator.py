@@ -520,9 +520,10 @@ class FXGraphTranslator:
     def _wrap_linear(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            input = args[0]
-            weight = args[1]
-            bias = args[2] if len(args) > 2 else node.kwargs.get("bias", None)
+            kwargs = self._retrieve_args(node.kwargs)
+            input = args[0] if len(args) > 0 else kwargs["input"]
+            weight = args[1] if len(args) > 1 else kwargs["weight"]
+            bias = args[2] if len(args) > 2 else kwargs.get("bias", None)
             return self.ops.linear(input, weight, bias=bias)
         return convert
 
@@ -1511,9 +1512,10 @@ class FXGraphTranslator:
     def _wrap_clamp(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
             x = args[0]
-            min_val = args[1] if len(args) > 1 else node.kwargs.get("min")
-            max_val = args[2] if len(args) > 2 else node.kwargs.get("max")
+            min_val = args[1] if len(args) > 1 else kwargs.get("min")
+            max_val = args[2] if len(args) > 2 else kwargs.get("max")
             return self.ops.clamp(x, min_val=min_val, max_val=max_val)
         return convert
 
@@ -1591,6 +1593,8 @@ class FXGraphTranslator:
             args = self.retrieve_args(node)
             x = args[0]
             shape = args[1:] if len(args) > 2 else args[1]
+            if not isinstance(shape, (list, tuple)):
+                shape = [shape]
             return self.ops.expand(x, shape)
         return convert
 
@@ -1599,6 +1603,8 @@ class FXGraphTranslator:
             args = self.retrieve_args(node)
             x = args[0]
             shape = args[1:] if len(args) > 2 else args[1]
+            if not isinstance(shape, (list, tuple)):
+                shape = [shape]
             return self.ops.reshape(x, shape)
         return convert
 

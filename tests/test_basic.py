@@ -727,6 +727,21 @@ def test_bmm_maps_directly_to_torch_bmm():
     assert "%torch.linalg.bmm" in def_to_string(result)
 
 
+def test_linear_accepts_keyword_only_fx_arguments():
+    class Model(torch.nn.Module):
+        def forward(self, input, weight, bias):
+            return torch._C._nn.linear(input=input, weight=weight, bias=bias)
+
+    world = make_world()
+    input, weight, bias = make_static_inputs_with_shapes(
+        world, [(2, 4, 8), (16, 8), (16,)]
+    )
+    result = translate_model(Model(), [input, weight, bias])
+
+    assert tensor_shape_values(result) == [2, 4, 16]
+    assert "%torch.linalg.linear" in def_to_string(result)
+
+
 def test_composite_high_rank_bmm_normalizes_to_torch_matmul():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):
@@ -1617,6 +1632,41 @@ def test_log_maps_to_torch_unary_semantics():
     result = translate_model(Model(), [x])
 
     assert "%torch.unary.log" in def_to_string(result)
+
+
+def test_rank0_log_uses_scalar_physical_semantics():
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    result = ops.log(ops._f32_float_lit(4.0))
+
+    assert tensor_shape_values(result) == []
+    assert "%torch.unary.log" not in def_to_string(result)
+
+
+def test_clamp_resolves_tensor_keyword_bound():
+    class Model(torch.nn.Module):
+        def forward(self, x, bound_source):
+            max_value = torch.log(torch.sum(bound_source))
+            return torch.clamp(x, max=max_value)
+
+    world = make_world()
+    x, bound_source = make_static_inputs_with_shapes(world, [(2, 4), (4,)])
+    result = translate_model(Model(), [x, bound_source])
+
+    assert tensor_shape_values(result) == [2, 4]
+    assert "%torch.binary.minimum" in def_to_string(result)
+
+
+def test_reshape_accepts_single_variadic_extent():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.reshape(-1)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4)])[0]
+    result = translate_model(Model(), [x])
+
+    assert tensor_shape_values(result) == [8]
 
 
 @pytest.mark.parametrize(

@@ -684,7 +684,15 @@ class OperatorLibrary:
 
     # Unary
     def exp(self, x): return self._torch_unary("unary.exp", x, floating=True)
-    def log(self, x): return self._torch_unary("unary.log", x, floating=True)
+    def log(self, x):
+        # A logical rank-0 Torch tensor is the scalar itself in MimIR's
+        # physical representation.  Applying the rank-polymorphic tensor
+        # schema would wrap that scalar in a non-assignable empty shape.
+        if not self.shape_of(x) and not isinstance(x.type(), mim.Seq):
+            if self._tensor_element_type(x) != self.F32:
+                raise NotImplementedError("rank-0 log currently requires float32")
+            return self._remember_shape(self.world.app(self.f32_log_axm, x), [])
+        return self._torch_unary("unary.log", x, floating=True)
     def tanh(self, x): return self._torch_unary("activation.tanh", x, floating=True)
     def sqrt(self, x): return self._torch_unary("unary.sqrt", x, floating=True)
     def sin(self, x): return self._torch_unary("unary.sin", x, floating=True)
