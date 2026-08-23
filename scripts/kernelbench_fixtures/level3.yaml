@@ -6,6 +6,12 @@
   input_shapes: [8x1x32x32]
   initializations: [rnd]
 
+- kernel: level3/6_GoogleNetInceptionModule.py
+  scalable: false
+  init_args: [8, 4, 4, 4, 2, 2, 2]
+  input_shapes: [1x8x16x16]
+  initializations: [rnd]
+
 - kernel: level3/8_ResNetBasicBlock.py
   scalable: false
   init_args: [3, 8, 1]
@@ -67,6 +73,18 @@
   max_fp_iters: 2048
   init_args: [8, 4, 4]
   input_shapes: [1x8x32x64]
+  initializations: [rnd]
+
+- kernel: level3/46_NetVladWithGhostClusters.py
+  scalable: false
+  init_args: [4, 8, 2]
+  input_shapes: [2x5x8]
+  initializations: [rnd]
+
+- kernel: level3/47_NetVladNoGhostClusters.py
+  scalable: false
+  init_args: [4, 8, 0]
+  input_shapes: [2x5x8]
   initializations: [rnd]
 
 - kernel: level3/43_MinGPTCausalAttention.py
