@@ -10,18 +10,19 @@ The 50-case corpus is run with an isolated cache and subprocess for every case:
 
 | Status | Cases | Meaning |
 | --- | ---: | --- |
-| PASS | 26 | All maintained, semantics-preserving fixtures pass eager comparison. |
-| INVALID | 22 | No scaled fixture exists; these were not compiled at reduced sizes. |
+| PASS | 27 | All maintained, semantics-preserving fixtures pass eager comparison. |
+| INVALID | 21 | No scaled fixture exists; these were not compiled at reduced sizes. |
 | FAIL | 2 | Mamba modules fail to import because `einops` is not installed. |
 
-The meaningful maintained-fixture rate is therefore **26/26 (100%)**. The 24
+The meaningful maintained-fixture rate is therefore **27/27 (100%)**. The 23
 remaining native fixtures require either full-size execution, optional imports,
 or additional model-specific fixtures; counting them as compiler failures would be
 misleading.
 
 The maintained set now includes AlexNet, VGG16, VGG19, GoogleNet InceptionV1, MobileNetV1,
 EfficientNet MBConv, ShuffleNet, RegNet, SwinMLP, ResNet18, SqueezeNet, UNet,
-NetVLAD, VisionAttention and MiniGPT structures. Fixtures reduce batch, class,
+NetVLAD, VisionAttention, MiniGPT and a loop-carried VanillaRNN structure.
+Fixtures reduce batch, class,
 width or sequence extents only where the model API permits it; they retain the
 model's stages and operator composition.
 
@@ -35,6 +36,9 @@ Exploratory native/small-model runs expose scalability separately from coverage:
 - small SwinTransformerV2 now passes frontend mapping after keyword-argument,
   rank-0 log and variadic reshape fixes, then reaches an LLVM residual-scalar
   failure.
+- the stateful VanillaRNN case mutates and then reloads a module buffer through
+  `copy_`; it requires mutation/alias functionalization rather than an identity
+  operator mapping.
 
 ## Level 4
 

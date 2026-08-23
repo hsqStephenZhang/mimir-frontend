@@ -124,3 +124,17 @@ def test_vgg_fixtures_preserve_classifier_input_shape():
         assert case["scalable"] is False
         assert case["input_shapes"] == ["1x3x224x224"]
         assert case["max_fp_iters"] == 512
+
+
+def test_vanilla_rnn_fixture_preserves_loop_carried_state():
+    cases = {
+        case["kernel"]: case
+        for case in yaml.safe_load(
+            (runner.DEFAULT_FIXTURES / "level3.yaml").read_text()
+        )
+    }
+
+    case = cases["level3/34_VanillaRNNHidden.py"]
+    assert case["input_shapes"] == ["4x2x16", "2x16"]
+    assert case["init_args"] == [16, 16, 8]
+    assert case["max_fp_iters"] == 512

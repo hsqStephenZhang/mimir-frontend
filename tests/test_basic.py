@@ -2072,6 +2072,33 @@ def test_single_input_cat_is_identity():
     assert result == x
 
 
+def test_stack_translates_to_torch_shape_operator():
+    class Model(torch.nn.Module):
+        def forward(self, first, second, third):
+            return torch.stack((first, second, third), dim=-2)
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 3), (2, 3), (2, 3)]
+    )
+    result = translate_model(Model(), inputs)
+
+    assert tensor_shape_values(result) == [2, 3, 3]
+    assert "%torch.shape.stack" in def_to_string(result)
+
+
+def test_stack_rejects_mismatched_input_shapes():
+    class Model(torch.nn.Module):
+        def forward(self, first, second):
+            return torch.stack((first, second))
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(world, [(2, 3), (2, 4)])
+
+    with pytest.raises(ValueError, match="equal shape"):
+        translate_model(Model(), inputs)
+
+
 def test_cat_accepts_folded_singleton_concat_extent():
     class Model(torch.nn.Module):
         def forward(self, first, rest):

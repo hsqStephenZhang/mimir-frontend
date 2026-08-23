@@ -156,6 +156,8 @@ class FXGraphTranslator:
         # Injective
         m[torch.cat] = self._wrap_cat()
         m["aten.cat.default"] = self._wrap_cat()
+        m[torch.stack] = self._wrap_stack()
+        m["aten.stack.default"] = self._wrap_stack()
         m[torch.permute] = self._wrap_permute()
         m["permute"] = self._wrap_permute()
         m["aten.permute.default"] = self._wrap_permute()
@@ -1717,6 +1719,14 @@ class FXGraphTranslator:
             tensors = args[0]
             dim = args[1] if len(args) > 1 else node.kwargs.get("dim", 0)
             return self.ops.cat(tensors, dim=dim)
+        return convert
+
+    def _wrap_stack(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            tensors = args[0]
+            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", 0)
+            return self.ops.stack(tensors, dim=dim)
         return convert
 
     def _wrap_full(self):

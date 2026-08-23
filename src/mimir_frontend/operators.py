@@ -4251,6 +4251,52 @@ class OperatorLibrary:
         result = self.world.app(callee, self.world.tuple(tensors))
         return self._remember_shape(result, out_dims)
 
+    def stack(self, tensors, dim=0):
+        """Translate PyTorch ``stack`` directly to ``%torch.shape.stack``."""
+        if isinstance(tensors, mim.Tuple):
+            count = tensors.num_projs()
+            tensors = [tensors.proj(count, i) for i in range(count)]
+        else:
+            tensors = list(tensors)
+        if not tensors:
+            raise ValueError("stack expects a non-empty tensor list")
+
+        input_dims = self.shape_of(tensors[0])
+        elem_t = self._tensor_element_type(tensors[0])
+        for tensor in tensors[1:]:
+            if self.shape_of(tensor) != input_dims:
+                raise ValueError("stack expects each tensor to have equal shape")
+            if self._tensor_element_type(tensor) != elem_t:
+                raise ValueError("stack expects each tensor to have equal dtype")
+
+        output_rank = len(input_dims) + 1
+        actual_dim = dim + output_rank if dim < 0 else dim
+        if actual_dim < 0 or actual_dim >= output_rank:
+            raise IndexError("stack dimension is out of range")
+
+        singleton_dims = list(input_dims)
+        singleton_dims.insert(actual_dim, self._lit_nat(1))
+        output_dims = list(singleton_dims)
+        output_dims[actual_dim] = self._lit_nat(len(tensors))
+
+        rank_in = self._lit_nat(len(input_dims))
+        rank_out = self._lit_nat(output_rank)
+        callee = self.world.annex(torch_dialect.shape.stack.value)
+        callee = self._apply_grouped(
+            callee,
+            [elem_t, self._lit_nat(len(tensors)), rank_in, rank_out],
+        )
+        callee = self.world.app(
+            callee,
+            self.world.tuple([
+                self.world.tuple(input_dims),
+                self.world.tuple(singleton_dims),
+                self.world.lit(self.world.type_idx(rank_out), actual_dim),
+            ]),
+        )
+        result = self.world.app(callee, self.world.tuple(tensors))
+        return self._remember_shape(result, output_dims)
+
     def transpose(self, x, permutation):
         """
         Translates to `%tensor.transpose`.

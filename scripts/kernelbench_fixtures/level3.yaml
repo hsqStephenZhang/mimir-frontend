@@ -85,6 +85,15 @@
   input_shapes: [2x16x8x8]
   initializations: [rnd]
 
+# Keep the recurrent data dependency and final stack while bounding Dynamo's
+# statically unrolled sequence length.
+- kernel: level3/34_VanillaRNNHidden.py
+  scalable: false
+  max_fp_iters: 512
+  init_args: [16, 16, 8]
+  input_shapes: [4x2x16, 2x16]
+  initializations: [rnd, rnd]
+
 - kernel: level3/25_ShuffleNetUnit.py
   scalable: false
   init_args: [24, 48, 3]
