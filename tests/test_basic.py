@@ -786,6 +786,22 @@ def test_matmul_maps_all_vector_rank_cases_to_torch_semantics(
     assert "%torch.linalg.matmul" in def_to_string(result)
 
 
+def test_functional_normalize_decomposes_to_norm_clamp_and_div():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.normalize(x, p=2.0, dim=-1, eps=1e-6)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 4, 8)])[0]
+    result = translate_model(Model(), [x])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 4, 8]
+    assert "%torch.reduction.norm2_dims_keepdim" in ir
+    assert "%torch.activation.clamp" in ir
+    assert "%torch.binary.div" in ir
+
+
 def test_matmul_leaves_batch_broadcast_to_torch_plugin():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):

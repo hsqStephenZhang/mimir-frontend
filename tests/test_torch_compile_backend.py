@@ -1052,6 +1052,14 @@ def test_tensor_matrix_matmul_matches_eager():
     )
 
 
+def test_functional_normalize_matches_eager():
+    class Normalize(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.normalize(x, p=2.0, dim=-1, eps=1e-6)
+
+    check_against_eager(Normalize(), torch.randn(2, 4, 8))
+
+
 def test_bmm_matches_eager():
     class BatchedMatmul(torch.nn.Module):
         def forward(self, lhs, rhs):

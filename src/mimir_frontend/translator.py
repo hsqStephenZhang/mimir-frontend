@@ -279,6 +279,8 @@ class FXGraphTranslator:
         m["aten.norm.ScalarOpt_dim"] = self._wrap_norm()
         m[torch.linalg.vector_norm] = self._wrap_norm(linalg=True)
         m["aten.linalg_vector_norm.default"] = self._wrap_norm(linalg=True)
+        m[torch.nn.functional.normalize] = self._wrap_normalize()
+        m["aten.normalize.default"] = self._wrap_normalize()
         m["aten.all.dim"] = self._wrap_bool_reduction(reduce_all=True)
         m["aten.any.dim"] = self._wrap_bool_reduction(reduce_all=False)
         # https://pytorch.org/docs/stable/generated/torch.var_mean.html
@@ -1020,6 +1022,19 @@ class FXGraphTranslator:
             return self.ops.norm(
                 args[0], p=p, dim=dim, keepdim=keepdim, dtype=dtype
             )
+        return convert
+
+    def _wrap_normalize(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+            p = args[1] if len(args) > 1 else kwargs.get("p", 2.0)
+            dim = args[2] if len(args) > 2 else kwargs.get("dim", 1)
+            eps = args[3] if len(args) > 3 else kwargs.get("eps", 1e-12)
+            out = args[4] if len(args) > 4 else kwargs.get("out", None)
+            if out is not None:
+                raise NotImplementedError("functional.normalize out= is unsupported")
+            return self.ops.normalize(args[0], p=p, dim=dim, eps=eps)
         return convert
 
     def _wrap_max(self, kind):

@@ -1426,6 +1426,26 @@ class OperatorLibrary:
         result = self.world.app(callee, input)
         return self._remember_shape(result, output_dims)
 
+    def normalize(self, input, p=2.0, dim=1, eps=1e-12):
+        """Map ``torch.nn.functional.normalize`` through existing reductions.
+
+        PyTorch computes ``input / max(vector_norm(input, p, dim, keepdim=True),
+        eps)``.  Keeping the denominator's reduced axes makes the ordinary
+        Torch binary broadcasting path express the API semantics without a
+        new tensor primitive.
+        """
+        if p not in (2, 2.0):
+            raise NotImplementedError(
+                f"functional.normalize p={p!r} is not implemented"
+            )
+        if not isinstance(eps, (int, float)) or eps < 0:
+            raise NotImplementedError(
+                "functional.normalize requires a non-negative static eps"
+            )
+        denominator = self.norm(input, p=2, dim=dim, keepdim=True)
+        denominator = self.clamp_min(denominator, float(eps))
+        return self.div(input, denominator)
+
     def dim_extrema(self, input, dim, keepdim=False, *, kind="max"):
         """Map value+index max/min; tie and NaN semantics live in MimIR."""
         dims = self.shape_of(input)
