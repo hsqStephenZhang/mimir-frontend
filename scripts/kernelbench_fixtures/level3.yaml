@@ -25,6 +25,12 @@
   input_shapes: [2x3x32x32]
   initializations: [rnd]
 
+- kernel: level3/18_SqueezeNet.py
+  scalable: false
+  init_args: [1000]
+  input_shapes: [1x3x64x64]
+  initializations: [rnd]
+
 - kernel: level3/31_VisionAttention.py
   scalable: false
   init_args: [16, 4]

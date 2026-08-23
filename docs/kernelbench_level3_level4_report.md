@@ -10,11 +10,11 @@ The 50-case corpus was discovered and run with four isolated cache shards:
 
 | Status | Cases | Meaning |
 | --- | ---: | --- |
-| PASS | 10 | All maintained, semantics-preserving fixtures pass eager comparison. |
-| INVALID | 38 | No scaled fixture exists; these were not compiled at reduced sizes. |
+| PASS | 11 | All maintained, semantics-preserving fixtures pass eager comparison. |
+| INVALID | 37 | No scaled fixture exists; these were not compiled at reduced sizes. |
 | FAIL | 2 | Mamba modules fail to import because `einops` is not installed. |
 
-The meaningful maintained-fixture rate is therefore **10/10 (100%)**. The 40
+The meaningful maintained-fixture rate is therefore **11/11 (100%)**. The 39
 remaining native fixtures require either full-size execution or additional
 model-specific fixtures; counting them as compiler failures would be
 misleading.
