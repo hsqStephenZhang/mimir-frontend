@@ -6,6 +6,12 @@
   input_shapes: [8x1x32x32]
   initializations: [rnd]
 
+- kernel: level3/5_AlexNet.py
+  scalable: false
+  init_args: [10]
+  input_shapes: [1x3x224x224]
+  initializations: [rnd]
+
 - kernel: level3/6_GoogleNetInceptionModule.py
   scalable: false
   init_args: [8, 4, 4, 4, 2, 2, 2]
