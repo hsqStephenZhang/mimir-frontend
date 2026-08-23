@@ -189,7 +189,8 @@ def run_case(
         except Exception as exc:
             raise InvalidCaseError(f"eager fixture failed: {exc}") from exc
         try:
-            options = {"max_fp_iters": max_fp_iters} if max_fp_iters else None
+            case_fp_iters = case.get("max_fp_iters", max_fp_iters)
+            options = {"max_fp_iters": case_fp_iters} if case_fp_iters else None
             # InstanceNorm emits a warning for singleton spatial inputs. Dynamo
             # can preserve this logging side effect by treating warnings.warn
             # as reorderable, instead of breaking the graph before the backend.

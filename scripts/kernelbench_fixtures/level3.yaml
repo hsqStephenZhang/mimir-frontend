@@ -12,6 +12,13 @@
   input_shapes: [2x3x32x32]
   initializations: [rnd]
 
+- kernel: level3/9_ResNet18.py
+  scalable: false
+  max_fp_iters: 2048
+  init_args: [1000]
+  input_shapes: [1x3x64x64]
+  initializations: [rnd]
+
 - kernel: level3/17_SqueezeNetFireModule.py
   scalable: false
   init_args: [3, 6, 16, 16]
