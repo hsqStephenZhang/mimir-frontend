@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 import importlib.util
 import json
 from pathlib import Path
+import resource
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ from mimir_frontend.backend import mimir_backend
 DEFAULT_LIGHTHOUSE = Path("/workspaces/ml-compiler/lighthouse")
 DEFAULT_FIXTURES = Path(__file__).resolve().parent / "kernelbench_fixtures"
 RESULT_PREFIX = "MIMIR_KERNELBENCH_RESULT="
+DEFAULT_MAX_MEMORY_GB = 32
 
 
 class InvalidCaseError(RuntimeError):
@@ -47,6 +49,22 @@ class CaseResult:
     phase: str
     elapsed_seconds: float
     detail: str = ""
+
+
+def apply_memory_limit(max_memory_gb: int) -> None:
+    """Bound one direct-case process before compiler allocations begin.
+
+    `RLIMIT_RSS` is advisory on Linux, while `RLIMIT_AS` is enforced for the
+    C++/Python allocations used by MimIR. The parent runner remains outside
+    this limit so it can collect a structured failure result.
+    """
+    if max_memory_gb <= 0:
+        return
+    limit = max_memory_gb * 1024**3
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    hard_limit = limit if hard == resource.RLIM_INFINITY else min(hard, limit)
+    soft_limit = limit if soft == resource.RLIM_INFINITY else min(soft, limit)
+    resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
 
 
 def load_module(path: Path) -> ModuleType:
@@ -290,6 +308,12 @@ def main() -> int:
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument(
+        "--max-memory-gb",
+        type=int,
+        default=DEFAULT_MAX_MEMORY_GB,
+        help="per-case address-space limit; use 0 to disable the limit",
+    )
     parser.add_argument("--size-divisor", type=int, default=16)
     parser.add_argument(
         "--max-fp-iters",
@@ -350,6 +374,7 @@ def main() -> int:
         print(f"[{index}/{len(cases)}] {name}", flush=True)
         torch._dynamo.reset()
         if args.direct:
+            apply_memory_limit(args.max_memory_gb)
             result = execute_direct(case, args.lighthouse, args.size_divisor, args.max_fp_iters)
             print(RESULT_PREFIX + json.dumps(asdict(result)), flush=True)
         else:
@@ -360,6 +385,7 @@ def main() -> int:
                 "--fixtures", str(args.fixtures),
                 "--case", name, "--size-divisor", str(args.size_divisor),
                 "--max-fp-iters", str(args.max_fp_iters), "--direct",
+                "--max-memory-gb", str(args.max_memory_gb),
             ]
             try:
                 child = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
