@@ -43,6 +43,19 @@
   input_shapes: [1x24x32x32]
   initializations: [rnd]
 
+- kernel: level3/26_ShuffleNet.py
+  scalable: false
+  max_fp_iters: 1024
+  init_args: [10, 1, [1, 1, 1], [8, 16, 32, 64]]
+  input_shapes: [1x3x32x32]
+  initializations: [rnd]
+
+- kernel: level3/27_RegNet.py
+  scalable: false
+  init_args: [3, 2, [8, 16], 10]
+  input_shapes: [1x3x32x32]
+  initializations: [rnd]
+
 - kernel: level3/29_SwinMLP.py
   scalable: false
   init_args: [32, 4, 3, 10, 8, [1, 1], [1, 2], 4, 2.0, 0.0, 0.0]
