@@ -43,6 +43,13 @@
   input_shapes: [1x24x32x32]
   initializations: [rnd]
 
+- kernel: level3/45_UNetSoftmax.py
+  scalable: false
+  max_fp_iters: 2048
+  init_args: [8, 4, 4]
+  input_shapes: [1x8x32x64]
+  initializations: [rnd]
+
 - kernel: level3/43_MinGPTCausalAttention.py
   scalable: false
   init_args: [16, 4, 0.0, 0.0, 16]
