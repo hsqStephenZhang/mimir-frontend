@@ -288,6 +288,19 @@ def test_lighthouse_cumprod_matches_eager():
     check_against_eager(Cumprod(), torch.rand(4, 8))
 
 
+def test_exclusive_cumsum_matches_eager():
+    class ExclusiveCumsum(torch.nn.Module):
+        def forward(self, x):
+            dim = 1
+            prefix = torch.cumsum(
+                x.narrow(dim, 0, x.size(dim) - 1), dim=dim
+            )
+            zero = torch.zeros_like(x.select(dim, 0).unsqueeze(dim))
+            return torch.cat((zero, prefix), dim=dim)
+
+    check_against_eager(ExclusiveCumsum(), torch.rand(4, 8))
+
+
 def test_lighthouse_roll_matches_eager():
     class Roll(torch.nn.Module):
         def forward(self, x):
@@ -1104,6 +1117,46 @@ def test_smooth_l1_mean_matches_eager(beta):
             return torch.nn.functional.smooth_l1_loss(x, target, beta=beta)
 
     check_against_eager(SmoothL1(), torch.randn(3, 5), torch.randn(3, 5))
+
+
+@pytest.mark.parametrize("reduction", ["sum", "mean", "batchmean"])
+@pytest.mark.parametrize("log_target", [False, True])
+def test_kl_div_reduced_matches_eager(reduction, log_target):
+    class KLDiv(torch.nn.Module):
+        def forward(self, input, target):
+            return torch.nn.functional.kl_div(
+                input, target, reduction=reduction, log_target=log_target
+            )
+
+    input = torch.log_softmax(torch.randn(2, 5), dim=1)
+    target = torch.log_softmax(torch.randn(2, 5), dim=1)
+    if not log_target:
+        target = target.exp()
+    check_against_eager(KLDiv(), input, target)
+
+
+@pytest.mark.parametrize("reduction", ["sum", "mean"])
+@pytest.mark.parametrize("swap", [False, True])
+def test_triplet_margin_reduced_matches_eager(reduction, swap):
+    class TripletMargin(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor,
+                positive,
+                negative,
+                margin=0.75,
+                p=2.0,
+                eps=1e-6,
+                swap=swap,
+                reduction=reduction,
+            )
+
+    check_against_eager(
+        TripletMargin(),
+        torch.randn(3, 5),
+        torch.randn(3, 5),
+        torch.randn(3, 5),
+    )
 
 
 def test_pytorch_fallback_decomposition_matches_eager():

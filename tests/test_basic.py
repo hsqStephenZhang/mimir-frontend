@@ -1031,6 +1031,25 @@ def test_reverse_cumsum_pattern_maps_to_directional_scan():
 
     assert tensor_shape_values(result) == [3, 5]
     assert "%torch.scan.cumsum_2d_direction" in ir
+
+
+def test_exclusive_cumsum_pattern_maps_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            dim = 1
+            prefix = torch.cumsum(
+                x.narrow(dim, 0, 7), dim=dim
+            )
+            zero = torch.zeros_like(x.select(dim, 0).unsqueeze(dim))
+            return torch.cat((zero, prefix), dim=dim)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(world, [(2, 8)])[0]
+    result = translate_model(Model(), [x])
+    ir = def_to_string(result)
+    assert "%torch.scan.cumsum_exclusive_2d" in ir
+    assert "%torch.shape.cat" not in ir
+    assert "%torch.indexing.narrow" not in ir
     assert "%torch.indexing.flip" not in ir
 
 

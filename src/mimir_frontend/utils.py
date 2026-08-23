@@ -173,23 +173,25 @@ def _mimir_i8_string(world: mim.World, text: str) -> mim.Def:
 
 
 def _named_phase(world: mim.World, name: str) -> mim.Def:
-    return world.implicit_app(world.annex(mim_compile.named.value), _mimir_i8_string(world, name))
+    return world.call(mim_compile.named, _mimir_i8_string(world, name))
 
 
 def _compile_phases(world: mim.World, loop: bool, phases: Sequence[mim.Def]) -> mim.Def:
-    callee = world.implicit_app(world.annex(mim_compile.phases.value), world.lit_bool(loop))
-    return world.implicit_app(callee, world.tuple(list(phases)))
+    return world.call(mim_compile.phases, world.lit_bool(loop), list(phases))
 
 
 def _cond_phase(world: mim.World, plugin_name: str, phase: mim.Def) -> mim.Def:
-    callee = world.implicit_app(world.annex(mim_compile.cond.value), _mimir_i8_string(world, plugin_name))
-    return world.implicit_app(callee, phase)
+    return world.call(mim_compile.cond, _mimir_i8_string(world, plugin_name), phase)
+
+
+def _unload_phase(world: mim.World, plugin_name: str) -> mim.Def:
+    return world.call(mim_compile.unload, _mimir_i8_string(world, plugin_name))
 
 
 def _default_compile_phase(world: mim.World) -> mim.Def:
     optimize = _compile_phases(
         world,
-        True,
+        False,
         [
             world.annex(mim_compile.scalarize.value),
             _compile_phases(
@@ -201,7 +203,7 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
                 ],
             ),
             _named_phase(world, "%mem.seo"),
-            world.annex(mim_compile.tail_rec_elim.value),
+            world.annex(mim_compile.static_arg_opt.value),
         ],
     )
 
@@ -218,7 +220,6 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
         world,
         False,
         [
-            _named_phase(world, "%mem.add_mem"),
             _named_phase(world, "%clos.clos_conv_prep"),
             _named_phase(world, "%clos.clos_conv"),
             clos_opt_phases,
@@ -235,21 +236,30 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
         [
             optimize,
             _named_phase(world, "%regex.lower_regex"),
+            _unload_phase(world, "regex"),
             _named_phase(world, "%torch.lower_torch"),
+            # Torch implementations expose static option matches and runtime
+            # guards. Normalize them while their values still have tensor types.
+            optimize,
+            _named_phase(world, "%option.lower_option"),
+            world.annex(mim_compile.cleanup.value),
             _named_phase(world, "%tensor.lower_tensor"),
-            _named_phase(world, "%tensor.fuse_tensor"),
             _named_phase(world, "%tensor.lower_to_mem"),
-            _named_phase(world, "%matrix.lower_aff"),
+            _unload_phase(world, "tensor"),
+            _cond_phase(world, "tensor", _named_phase(world, "%mem.add_mem")),
+            _named_phase(world, "%btensor.lower_map_reduce"),
+            _unload_phase(world, "btensor"),
             _named_phase(world, "%gpu.mem_checks"),
             _named_phase(world, "%autodiff.eval"),
             _named_phase(world, "%autodiff.zero_repl"),
-            _named_phase(world, "%matrix.lower_matrix_high_level_map_reduce"),
-            _named_phase(world, "%matrix.lower_matrix_medium_level"),
+            _unload_phase(world, "autodiff"),
             _named_phase(world, "%buffer.lower_ptr"),
+            _unload_phase(world, "buffer"),
             _named_phase(world, "%affine.lower_index"),
             _named_phase(world, "%cps.conv"),
+            _unload_phase(world, "cps"),
             _named_phase(world, "%affine.lower_for"),
-            world.annex(mim_compile.internal_cleanup.value),
+            _unload_phase(world, "affine"),
             _cond_phase(world, "clos", clos_phases),
             world.annex(mim_compile.lam_spec.value),
             optimize,
@@ -258,6 +268,7 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
             _named_phase(world, "%mem.remem_repl"),
             _named_phase(world, "%mem.alloc2malloc_repl"),
             _named_phase(world, "%refly.remove_dbg_repl"),
+            _unload_phase(world, "refly"),
             _named_phase(world, "%gpu.check_addr_spaces_repl"),
             _named_phase(world, "%ll.emit"),
         ],
@@ -266,11 +277,16 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
 
 def _define_compile_lam(world: mim.World, phase: mim.Def) -> mim.Def:
     phase_t = world.annex(mim_compile.Phase.value)
-    compile_lam = world.mut_fun([], phase_t)
+    compile_lam = world.mut_lam([], phase_t)
     compile_lam.set("_compile")
-    compile_lam.app(True, compile_lam.var().proj(1), [phase])
+    compile_lam.set([world.lit_bool(True), phase])
     compile_lam.externalize()
     return compile_lam
+
+
+def install_execution_compile_phase(world: mim.World) -> mim.Def:
+    """Install the Torch-aware host execution pipeline as ``_compile``."""
+    return _define_compile_lam(world, _default_compile_phase(world))
 
 
 def build_model_function(
@@ -382,7 +398,7 @@ def model_to_mimir(
     result_lam = build_model_function(world, model, input_shapes, name=name)
 
     if compile_phase == "default":
-        compile_lam = _define_compile_lam(world, _default_compile_phase(world))
+        compile_lam = install_execution_compile_phase(world)
         return _write_defs_to_string([("_compile", compile_lam), (name, result_lam)], max_depth)
 
     return _write_def_to_string(result_lam, name, max_depth)

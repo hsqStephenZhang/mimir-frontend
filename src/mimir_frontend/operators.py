@@ -37,6 +37,8 @@ class OperatorLibrary:
         self._torch_semantics_cache: dict[tuple[mim.Def, bool], mim.Def] = {}
         self._flip_provenance: dict[mim.Def, tuple[mim.Def, tuple[int, ...]]] = {}
         self._cumsum_provenance: dict[mim.Def, tuple[mim.Def, int, object]] = {}
+        self._narrow_provenance: dict[mim.Def, tuple[mim.Def, int, object, object]] = {}
+        self._known_zero_tensors: set[mim.Def] = set()
 
         def bind_math_axm(axm_enum):
             axm = world.annex(axm_enum.value)
@@ -1059,7 +1061,7 @@ class OperatorLibrary:
                     getter, [elem_type, self._lit_nat(0), self.world.tuple([])]
                 )
                 scalar = self.world.app(
-                    getter, self.world.tuple([input, self.world.tuple([])])
+                    getter, self.world.tuple([self.world.tuple([]), input])
                 )
             callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(callee, [elem_type, out_rank])
@@ -1147,6 +1149,11 @@ class OperatorLibrary:
         callee = self._apply_grouped(callee, [elem_type, self._lit_nat(out_rank_val)])
         callee = self.world.app(callee, [out_shape_tuple, scalar_def])
         return self._remember_shape(callee, shape)
+
+    def zeros_like(self, reference, dtype):
+        result = self.full(self.shape_of(reference), 0, dtype=dtype)
+        self._known_zero_tensors.add(result)
+        return result
             
         out_shape_tuple, out_rank_val = self._extract_shape(shape)
         out_rank = self._lit_nat(out_rank_val)
@@ -1225,6 +1232,22 @@ class OperatorLibrary:
         callee = self.world.annex(torch_dialect.creation.scalar_tensor.value)
         result = self.world.app(self.world.app(callee, elem_type), scalar)
         return self._remember_shape(result, [])
+
+    def scalar_value(self, value):
+        """Extract a logical rank-0 tensor at the native function boundary."""
+        if self.shape_of(value):
+            return value
+        value_type = value.type()
+        if not isinstance(value_type, mim.Seq):
+            return value
+        elem_type = self._tensor_element_type(value)
+        getter = self.world.annex(tensor.get.value)
+        getter = self._apply_grouped(
+            getter, [elem_type, self._lit_nat(0), self.world.tuple([])]
+        )
+        return self.world.app(
+            getter, self.world.tuple([self.world.tuple([]), value])
+        )
 
     def fill_scalar(self, input, value):
         dims = self.shape_of(input)
@@ -1368,6 +1391,18 @@ class OperatorLibrary:
         ]
         if not reduced_axes:
             return self._remember_shape(self.abs(input), output_dims)
+
+        if not keepdim and len(reduced_axes) == len(physical_dims):
+            callee = self.world.annex(torch_dialect.reduction.norm2_all.value)
+            callee = self.world.app(
+                callee, self._torch_semantics(input, floating=True)
+            )
+            callee = self._apply_grouped(
+                callee,
+                [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
+            )
+            result = self.world.app(callee, input)
+            return self._remember_shape(result, [])
 
         op = (
             torch_dialect.reduction.norm2_dims_keepdim
@@ -1602,18 +1637,26 @@ class OperatorLibrary:
                 self.world.tuple(physical_shape),
             ],
         )
+        provenance_start = start
+        provenance_length = length
         start = self.world.lit_i64(start) if isinstance(start, int) else start
+        length = self._to_nat(length)
         callee = self.world.app(
             callee,
             self.world.tuple(
-                [self.world.lit_i64(physical_dim), start, self._to_nat(length)]
+                [self.world.lit_i64(physical_dim), start, length]
             ),
         )
         result = self.world.app(callee, input)
         output_shape = list(logical_shape)
         if 0 <= canonical < logical_rank:
             output_shape[canonical] = self._to_nat(length)
-        return self._remember_shape(result, output_shape)
+        result = self._remember_shape(result, output_shape)
+        if 0 <= canonical < logical_rank:
+            self._narrow_provenance[result] = (
+                input, canonical, provenance_start, provenance_length
+            )
+        return result
 
     def _triangular(self, input, diagonal, op, name):
         """Instantiate a Torch triangular axiom with a dtype-correct zero."""
@@ -3594,54 +3637,69 @@ class OperatorLibrary:
             raise NotImplementedError(
                 "reverse cumsum currently requires a rank-2 floating tensor"
             )
-        if boolean_input and len(physical_dims) == 1:
-            callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64_1d.value)
-            callee = self.world.app(callee, physical_dims[0])
-        elif boolean_input:
+        if len(physical_dims) not in (1, 2):
+            raise NotImplementedError("cumsum currently supports physical rank 1 or 2")
+        scan_dims = (
+            physical_dims
+            if len(physical_dims) == 2
+            else [self._lit_nat(1), physical_dims[0]]
+        )
+        scan_dim = physical_dim if len(physical_dims) == 2 else 1
+        if boolean_input:
             callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64.value)
-            callee = self._apply_grouped(
-                callee,
-                [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
-            )
-            callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+            callee = self._apply_grouped(callee, scan_dims)
+            callee = self.world.app(callee, self.world.lit_i64(scan_dim))
         else:
             op = (
                 torch_dialect.scan.cumsum_2d_direction
                 if reverse
-                else (
-                    torch_dialect.scan.cumsum_2d
-                    if len(physical_dims) == 2
-                    else torch_dialect.scan.cumsum
-                )
+                else torch_dialect.scan.cumsum_2d
             )
             callee = self.world.annex(op.value)
             callee = self.world.app(
                 callee, self._torch_semantics(input, floating=True)
             )
-            if len(physical_dims) == 2:
-                callee = self._apply_grouped(callee, physical_dims)
-            else:
-                callee = self._apply_grouped(
-                    callee,
-                    [
-                        self._lit_nat(len(physical_dims)),
-                        self.world.tuple(physical_dims),
-                    ],
-                )
+            callee = self._apply_grouped(callee, scan_dims)
             if reverse:
                 callee = self.world.app(
                     callee,
                     self.world.tuple(
-                        [self.world.lit_i64(physical_dim), self.world.lit_tt()]
+                        [self.world.lit_i64(scan_dim), self.world.lit_tt()]
                     ),
                 )
             else:
-                callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+                callee = self.world.app(callee, self.world.lit_i64(scan_dim))
         result = self.world.app(callee, input)
         result = self._remember_shape(result, dims)
         if not reverse:
             self._cumsum_provenance[result] = (input, canonical_dim, dtype)
         return result
+
+    def _exclusive_cumsum_2d(self, input, logical_dim, dtype=None):
+        if dtype not in (None, torch.float32, torch.float):
+            raise NotImplementedError(
+                "exclusive cumsum dtype conversion is not implemented"
+            )
+        dims = self.shape_of(input)
+        physical_axes = [
+            axis
+            for axis, extent in enumerate(dims)
+            if not self._is_lit_nat_value(extent, 1)
+        ]
+        physical_dims = [dims[axis] for axis in physical_axes]
+        if len(physical_dims) != 2 or logical_dim not in physical_axes:
+            raise NotImplementedError(
+                "exclusive cumsum currently requires physical rank 2"
+            )
+        callee = self.world.annex(torch_dialect.scan.cumsum_exclusive_2d.value)
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(callee, physical_dims)
+        callee = self.world.app(
+            callee, self.world.lit_i64(physical_axes.index(logical_dim))
+        )
+        return self._remember_shape(self.world.app(callee, input), dims)
 
     def cumprod(self, input, dim, *, dtype=None):
         if dtype is not None:
@@ -3662,24 +3720,18 @@ class OperatorLibrary:
             return input
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_dim = physical_axes.index(canonical_dim)
-        op = (
-            torch_dialect.scan.cumprod_2d
+        if len(physical_dims) not in (1, 2):
+            raise NotImplementedError("cumprod currently supports physical rank 1 or 2")
+        scan_dims = (
+            physical_dims
             if len(physical_dims) == 2
-            else torch_dialect.scan.cumprod
+            else [self._lit_nat(1), physical_dims[0]]
         )
-        callee = self.world.annex(op.value)
+        scan_dim = physical_dim if len(physical_dims) == 2 else 1
+        callee = self.world.annex(torch_dialect.scan.cumprod_2d.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
-        if len(physical_dims) == 2:
-            callee = self._apply_grouped(callee, physical_dims)
-        else:
-            callee = self._apply_grouped(
-                callee,
-                [
-                    self._lit_nat(len(physical_dims)),
-                    self.world.tuple(physical_dims),
-                ],
-            )
-        result = self.world.app(callee, self.world.lit_i64(physical_dim))
+        callee = self._apply_grouped(callee, scan_dims)
+        result = self.world.app(callee, self.world.lit_i64(scan_dim))
         result = self.world.app(result, input)
         return self._remember_shape(result, dims)
 
@@ -4078,6 +4130,33 @@ class OperatorLibrary:
         result = self.world.app(callee, x)
         return self._remember_shape(result, out_dims)
 
+    def _match_exclusive_cumsum_cat(self, tensors, dims_list, dim):
+        if len(tensors) != 2 or tensors[0] not in self._known_zero_tensors:
+            return None
+        cumsum = self._cumsum_provenance.get(tensors[1])
+        if cumsum is None:
+            return None
+        narrowed, cumsum_dim, dtype = cumsum
+        narrow = self._narrow_provenance.get(narrowed)
+        if narrow is None:
+            return None
+        original, narrow_dim, start, length = narrow
+        if cumsum_dim != dim or narrow_dim != dim or start != 0:
+            return None
+
+        original_dims = self.shape_of(original)
+        extent = self.rules._dim_literal_value(original_dims[dim])
+        length_value = (
+            length
+            if isinstance(length, int)
+            else self.rules._dim_literal_value(length)
+        )
+        if extent is None or length_value != extent - 1:
+            return None
+        if not self._is_lit_nat_value(dims_list[0][dim], 1):
+            return None
+        return self._exclusive_cumsum_2d(original, dim, dtype=dtype)
+
     def cat(self, tensors, dim=0):
         """
         Translates to `%torch.shape.cat`.
@@ -4113,6 +4192,11 @@ class OperatorLibrary:
             dim += logical_rank
         if dim < 0 or dim >= logical_rank:
             raise ValueError("cat dimension is out of range")
+        exclusive = self._match_exclusive_cumsum_cat(
+            tensors, input_dims_list, dim
+        )
+        if exclusive is not None:
+            return exclusive
         out_dims = self.rules.concat_shape(input_dims_list, dim)
 
         rank = self._lit_nat(logical_rank)

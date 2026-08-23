@@ -85,7 +85,7 @@ import torch
 from torch import fx
 
 from .decomposition import apply_decomposition_policy, resolve_decomposition_policy
-from .utils import build_model_function
+from .utils import build_model_function, install_execution_compile_phase
 
 # Dynamo intentionally keeps recurrent modules opaque unless this is enabled.
 # The backend handles their standard ATen entry points directly.
@@ -257,9 +257,9 @@ def _cache_store(cache_dir: Path, sources: list[Path]) -> None:
 def _emit_profile(driver, profile: str, build_dir: Path, name: str, debug_dir) -> None:
     """Publish all completed phase spans, including those from failed compiles."""
     report = {
-        "summary": driver.profiler().summary,
-        "tree": driver.profiler().tree,
-        "trace": driver.profiler().chrome_trace,
+        "summary": driver.profile_summary,
+        "tree": driver.profile_tree,
+        "trace": driver.profile_trace,
     }[profile]()
     if profile == "trace" or debug_dir:
         dest = build_dir / f"{name}_profile.{'json' if profile == 'trace' else 'txt'}"
@@ -435,16 +435,17 @@ def mimir_backend(
             driver.flags().max_fp_iters = max_fp_iters
         world = driver.world()
         if profile:
-            # Phases only record spans while this flag is set (see mim Phase::run).
-            driver.flags().profile = {
-                "summary": mim.Flags.Profile.Summary,
-                "tree": mim.Flags.Profile.Tree,
-                "trace": mim.Flags.Profile.Trace,
-            }[profile]
+                # Phases only record spans while this flag is set (see mim Phase::run).
+                driver.flags().profile = {
+                    "summary": mim.Profile.Summary,
+                    "tree": mim.Profile.Tree,
+                    "trace": mim.Profile.Trace,
+                }[profile]
 
         build_model_function(
             world, gm, input_shapes, input_dtypes=input_dtypes, name=name
         )
+        install_execution_compile_phase(world)
 
         try:
             with _compile_lock:

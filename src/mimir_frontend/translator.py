@@ -1731,7 +1731,7 @@ class FXGraphTranslator:
                 raise NotImplementedError("zeros_like dtype conversion is not implemented")
             if kwargs.get("requires_grad", False):
                 raise NotImplementedError("zeros_like requires_grad=True is not implemented")
-            return self.ops.full(self.ops.shape_of(reference), 0, dtype=dtype)
+            return self.ops.zeros_like(reference, dtype)
         return convert
 
     def _wrap_tensor_constant(self):
@@ -1946,6 +1946,7 @@ class FXGraphTranslator:
             for actual_input, shape in zip(actual_inputs[len(placeholders):], self.param_shapes):
                 self.ops._remember_shape(actual_input, shape)
         result = self.translate(graph, actual_inputs)
+        result = self.ops.scalar_value(result)
 
         dom_with_ret.set(num_params - 1, self.world.cn([result.type()]))
         ret_cont = lam.var().proj(num_params, num_params - 1)
