@@ -37,6 +37,12 @@
   input_shapes: [2x16x8x8]
   initializations: [rnd]
 
+- kernel: level3/25_ShuffleNetUnit.py
+  scalable: false
+  init_args: [24, 48, 3]
+  input_shapes: [1x24x32x32]
+  initializations: [rnd]
+
 - kernel: level3/43_MinGPTCausalAttention.py
   scalable: false
   init_args: [16, 4, 0.0, 0.0, 16]
