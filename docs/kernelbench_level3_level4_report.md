@@ -2,28 +2,37 @@
 
 ## Level 3
 
-The 50-case corpus was discovered and run with four isolated cache shards:
+The 50-case corpus is run with an isolated cache and subprocess for every case:
 
 ```text
---suite level3 --size-divisor 16 --timeout 240 --max-fp-iters 512
+--suite level3 --size-divisor 16 --timeout 180 --max-memory-gb 16 --max-fp-iters 512
 ```
 
 | Status | Cases | Meaning |
 | --- | ---: | --- |
-| PASS | 13 | All maintained, semantics-preserving fixtures pass eager comparison. |
-| INVALID | 35 | No scaled fixture exists; these were not compiled at reduced sizes. |
+| PASS | 24 | All maintained, semantics-preserving fixtures pass eager comparison. |
+| INVALID | 24 | No scaled fixture exists; these were not compiled at reduced sizes. |
 | FAIL | 2 | Mamba modules fail to import because `einops` is not installed. |
 
-The meaningful maintained-fixture rate is therefore **13/13 (100%)**. The 37
-remaining native fixtures require either full-size execution or additional
-model-specific fixtures; counting them as compiler failures would be
+The meaningful maintained-fixture rate is therefore **24/24 (100%)**. The 26
+remaining native fixtures require either full-size execution, optional imports,
+or additional model-specific fixtures; counting them as compiler failures would be
 misleading.
 
-Structured results are stored in:
+The maintained set now includes AlexNet, GoogleNet InceptionV1, MobileNetV1,
+EfficientNet MBConv, ShuffleNet, RegNet, SwinMLP, ResNet18, SqueezeNet, UNet,
+NetVLAD, VisionAttention and MiniGPT structures. Fixtures reduce batch, class,
+width or sequence extents only where the model API permits it; they retain the
+model's stages and operator composition.
 
-```text
-/tmp/kernelbench-level3-20260818-shard-{0,1,2,3}.json
-```
+Exploratory native/small-model runs expose scalability separately from coverage:
+
+- EfficientNetB0 reaches compilation but exhausts the 16 GiB per-case limit;
+- native VisionTransformer reaches `%mem.seo`, which does not converge within
+  2048 iterations;
+- small SwinTransformerV2 now passes frontend mapping after keyword-argument,
+  rank-0 log and variadic reshape fixes, then reaches an LLVM residual-scalar
+  failure.
 
 ## Level 4
 
