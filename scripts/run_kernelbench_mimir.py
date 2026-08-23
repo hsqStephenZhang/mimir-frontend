@@ -293,7 +293,7 @@ def main() -> int:
     parser.add_argument(
         "--max-fp-iters",
         type=int,
-        default=128,
+        default=512,
         help="cap MimIR fixed-point iterations; use 0 for the compiler default",
     )
     parser.add_argument("--timeout", type=int, default=180)
