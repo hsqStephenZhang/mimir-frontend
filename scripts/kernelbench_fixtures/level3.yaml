@@ -38,6 +38,22 @@
   input_shapes: [1x3x64x64]
   initializations: [rnd]
 
+# VGG's classifier consumes exactly 512 * 7 * 7 features. Keep the canonical
+# image extent and reduce only batch size and class count.
+- kernel: level3/11_VGG16.py
+  scalable: false
+  max_fp_iters: 512
+  init_args: [10]
+  input_shapes: [1x3x224x224]
+  initializations: [rnd]
+
+- kernel: level3/12_VGG19.py
+  scalable: false
+  max_fp_iters: 512
+  init_args: [10]
+  input_shapes: [1x3x224x224]
+  initializations: [rnd]
+
 - kernel: level3/17_SqueezeNetFireModule.py
   scalable: false
   init_args: [3, 6, 16, 16]

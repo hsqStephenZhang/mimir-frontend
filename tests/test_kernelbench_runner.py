@@ -95,7 +95,7 @@ def test_repository_discovers_all_level1_to_level3_models():
     )
 
     assert len(cases) == 250
-    assert sum(case["fixture"] == "yaml" for case in cases) >= 203
+    assert sum(case["fixture"] == "yaml" for case in cases) >= 205
 
 
 def test_repository_discovers_level4_models_explicitly():
@@ -109,3 +109,18 @@ def test_repository_discovers_level4_models_explicitly():
 
     assert len(cases) == 20
     assert all(case["fixture"] == "native" for case in cases)
+
+
+def test_vgg_fixtures_preserve_classifier_input_shape():
+    cases = {
+        case["kernel"]: case
+        for case in yaml.safe_load(
+            (runner.DEFAULT_FIXTURES / "level3.yaml").read_text()
+        )
+    }
+
+    for kernel in ("level3/11_VGG16.py", "level3/12_VGG19.py"):
+        case = cases[kernel]
+        assert case["scalable"] is False
+        assert case["input_shapes"] == ["1x3x224x224"]
+        assert case["max_fp_iters"] == 512

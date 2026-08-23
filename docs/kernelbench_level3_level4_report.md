@@ -10,16 +10,16 @@ The 50-case corpus is run with an isolated cache and subprocess for every case:
 
 | Status | Cases | Meaning |
 | --- | ---: | --- |
-| PASS | 24 | All maintained, semantics-preserving fixtures pass eager comparison. |
-| INVALID | 24 | No scaled fixture exists; these were not compiled at reduced sizes. |
+| PASS | 26 | All maintained, semantics-preserving fixtures pass eager comparison. |
+| INVALID | 22 | No scaled fixture exists; these were not compiled at reduced sizes. |
 | FAIL | 2 | Mamba modules fail to import because `einops` is not installed. |
 
-The meaningful maintained-fixture rate is therefore **24/24 (100%)**. The 26
+The meaningful maintained-fixture rate is therefore **26/26 (100%)**. The 24
 remaining native fixtures require either full-size execution, optional imports,
 or additional model-specific fixtures; counting them as compiler failures would be
 misleading.
 
-The maintained set now includes AlexNet, GoogleNet InceptionV1, MobileNetV1,
+The maintained set now includes AlexNet, VGG16, VGG19, GoogleNet InceptionV1, MobileNetV1,
 EfficientNet MBConv, ShuffleNet, RegNet, SwinMLP, ResNet18, SqueezeNet, UNet,
 NetVLAD, VisionAttention and MiniGPT structures. Fixtures reduce batch, class,
 width or sequence extents only where the model API permits it; they retain the
@@ -28,6 +28,8 @@ model's stages and operator composition.
 Exploratory native/small-model runs expose scalability separately from coverage:
 
 - EfficientNetB0 reaches compilation but exhausts the 16 GiB per-case limit;
+- ResNet101 with its canonical `[3, 4, 23, 3]` stage depths also reaches
+  compilation but exhausts the 16 GiB per-case limit;
 - native VisionTransformer reaches `%mem.seo`, which does not converge within
   2048 iterations;
 - small SwinTransformerV2 now passes frontend mapping after keyword-argument,
