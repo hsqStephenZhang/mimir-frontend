@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import warnings
 from types import ModuleType
 from typing import Any
 
@@ -189,6 +190,10 @@ def run_case(
             raise InvalidCaseError(f"eager fixture failed: {exc}") from exc
         try:
             options = {"max_fp_iters": max_fp_iters} if max_fp_iters else None
+            # InstanceNorm emits a warning for singleton spatial inputs. Dynamo
+            # can preserve this logging side effect by treating warnings.warn
+            # as reorderable, instead of breaking the graph before the backend.
+            torch._dynamo.config.reorderable_logging_functions.add(warnings.warn)
             compiled = torch.compile(
                 model,
                 backend=mimir_backend,
