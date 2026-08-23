@@ -2318,10 +2318,19 @@ class OperatorLibrary:
         return self.world.app(callee, self.world.tuple([lhs, rhs]))
 
     def bmm(self, lhs, rhs):
-        """Map `aten.bmm` directly; its rank-3 semantics live in MimIR."""
+        """Map `aten.bmm`, normalizing composite high-rank uses through matmul.
+
+        Native ``torch.bmm`` is rank-3-only.  PyTorch decompositions used by
+        attention kernels can nevertheless leave a higher-rank ``aten.bmm``
+        in the FX graph before the batch dimensions have been folded.  The
+        Torch layer owns that normalization; the tensor layer remains a
+        strict rank-3 primitive.
+        """
         lhs_dims = self._physical_dims(self.shape_of(lhs))
         rhs_dims = self._physical_dims(self.shape_of(rhs))
         if len(lhs_dims) != 3 or len(rhs_dims) != 3:
+            if len(lhs_dims) > 3 and len(rhs_dims) > 3:
+                return self.matmul(lhs, rhs)
             raise ValueError("aten.bmm expects two rank-3 tensors")
 
         batch, rows, contract = lhs_dims

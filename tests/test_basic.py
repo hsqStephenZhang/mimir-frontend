@@ -727,6 +727,25 @@ def test_bmm_maps_directly_to_torch_bmm():
     assert "%torch.linalg.bmm" in def_to_string(result)
 
 
+def test_composite_high_rank_bmm_normalizes_to_torch_matmul():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            # Some PyTorch composite attention paths expose this intermediate
+            # as aten.bmm before their batch dimensions are folded.
+            return torch.ops.aten.bmm.default(lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(
+        world, [(2, 4, 5, 8), (2, 4, 8, 16)]
+    )
+    result = translate_model(Model(), [lhs, rhs])
+    ir = def_to_string(result)
+
+    assert tensor_shape_values(result) == [2, 4, 5, 16]
+    assert "%torch.linalg.matmul" in ir
+    assert "%torch.linalg.bmm" not in ir
+
+
 def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):
