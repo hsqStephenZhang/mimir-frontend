@@ -43,6 +43,12 @@
   input_shapes: [1x24x32x32]
   initializations: [rnd]
 
+- kernel: level3/29_SwinMLP.py
+  scalable: false
+  init_args: [32, 4, 3, 10, 8, [1, 1], [1, 2], 4, 2.0, 0.0, 0.0]
+  input_shapes: [1x3x32x32]
+  initializations: [rnd]
+
 - kernel: level3/45_UNetSoftmax.py
   scalable: false
   max_fp_iters: 2048
@@ -54,6 +60,12 @@
   scalable: false
   init_args: [16, 4, 0.0, 0.0, 16]
   input_shapes: [2x16x16]
+  initializations: [rnd]
+
+- kernel: level3/44_MiniGPTBlock.py
+  scalable: false
+  init_args: [16, 4, 0.0, 0.0, 16]
+  input_shapes: [2x8x16]
   initializations: [rnd]
 
 - kernel: level3/50_ReLUSelfAttention.py
