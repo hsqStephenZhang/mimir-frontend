@@ -90,15 +90,27 @@ def parse_shape(text: str | int, divisor: int) -> tuple[int, ...]:
     )
 
 
-def make_input(shape: tuple[int, ...], initialization: str) -> torch.Tensor:
+def make_input(
+    shape: tuple[int, ...], initialization: str, dtype: str = "float32"
+) -> torch.Tensor:
+    dtypes = {
+        "float32": torch.float32,
+        "int64": torch.int64,
+    }
+    try:
+        torch_dtype = dtypes[dtype]
+    except KeyError as exc:
+        raise ValueError(f"unsupported fixture dtype {dtype!r}") from exc
     if initialization == "rnd":
-        return torch.rand(shape)
+        if not torch_dtype.is_floating_point:
+            raise ValueError(f"rnd initialization requires floating dtype, got {dtype}")
+        return torch.rand(shape, dtype=torch_dtype)
     if initialization == "0":
-        return torch.zeros(shape)
+        return torch.zeros(shape, dtype=torch_dtype)
     if initialization == "id":
         if len(shape) != 2:
             raise ValueError(f"identity initialization requires rank 2, got {shape}")
-        return torch.eye(*shape)
+        return torch.eye(*shape, dtype=torch_dtype)
     raise ValueError(f"unsupported initialization {initialization!r}")
 
 
@@ -184,10 +196,18 @@ def prepare_case(
             model = module.Model(
                 *parse_init_args(case.get("init_args"), module, fixture_divisor)
             ).eval()
+            dtypes = case.get(
+                "dtypes", ["float32"] * len(case["input_shapes"])
+            )
             inputs = [
-                make_input(parse_shape(shape, fixture_divisor), initialization)
-                for shape, initialization in zip(
-                    case["input_shapes"], case["initializations"], strict=True
+                make_input(
+                    parse_shape(shape, fixture_divisor), initialization, dtype
+                )
+                for shape, initialization, dtype in zip(
+                    case["input_shapes"],
+                    case["initializations"],
+                    dtypes,
+                    strict=True,
                 )
             ]
     except InvalidCaseError:

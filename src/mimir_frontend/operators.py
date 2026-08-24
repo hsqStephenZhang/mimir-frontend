@@ -1881,6 +1881,35 @@ class OperatorLibrary:
         result = self.world.app(callee, self._f32_float_lit(beta))
         return self._remember_shape(result, [])
 
+    def cross_entropy_mean_2d(self, input, target):
+        """Map default rank-2 cross entropy; its formula lives in MimIR."""
+        input_dims = self.shape_of(input)
+        target_dims = self.shape_of(target)
+        if len(input_dims) != 2 or len(target_dims) != 1:
+            raise NotImplementedError(
+                "cross_entropy currently requires (N, C) logits and (N) target"
+            )
+        if not self.rules.same_shape([input_dims[0]], target_dims):
+            raise ValueError("cross_entropy target batch must match input batch")
+        if self._tensor_element_type(target) != self.I64:
+            raise TypeError("cross_entropy class target must have dtype int64")
+        if len(self._physical_dims(input_dims)) != 2 or len(
+            self._physical_dims(target_dims)
+        ) != 1:
+            raise NotImplementedError(
+                "cross_entropy with folded singleton batch/class axes is not implemented"
+            )
+
+        callee = self.world.annex(
+            torch_dialect.loss.cross_entropy_mean_2d.value
+        )
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(callee, input_dims)
+        result = self.world.app(callee, self.world.tuple([input, target]))
+        return self._remember_shape(result, [])
+
     def kl_div_reduced(self, input, target, reduction, log_target=False):
         """Map reduced KLDiv; pointwise and reduction branches live in MimIR."""
         dims = self.shape_of(input)

@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 
+import torch
 import yaml
 
 
@@ -81,6 +82,36 @@ def test_fixed_fixture_is_not_rescaled(tmp_path: Path):
 
     assert instance.width == 32
     assert inputs[0].shape == (8, 32)
+
+
+def test_make_input_supports_integer_zero_fixture():
+    value = runner.make_input((8,), "0", "int64")
+
+    assert value.dtype == torch.int64
+    assert torch.equal(value, torch.zeros(8, dtype=torch.int64))
+
+
+def test_prepare_case_applies_per_input_dtypes(tmp_path: Path):
+    case = {
+        "kernel": "level1/cross_entropy.py",
+        "fixture": "yaml",
+        "scalable": False,
+        "init_args": [],
+        "input_shapes": ["4x8", "4"],
+        "initializations": ["rnd", "0"],
+        "dtypes": ["float32", "int64"],
+    }
+    model = tmp_path / "third_party/KernelBench/KernelBench/level1/cross_entropy.py"
+    model.parent.mkdir(parents=True)
+    model.write_text(
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def forward(self, logits, target): return logits\n"
+    )
+
+    _, inputs = runner.prepare_case(case, tmp_path, size_divisor=16)
+
+    assert [value.dtype for value in inputs] == [torch.float32, torch.int64]
 
 
 def test_repository_discovers_all_level1_to_level3_models():

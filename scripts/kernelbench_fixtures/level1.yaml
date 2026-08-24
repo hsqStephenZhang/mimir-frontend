@@ -1,0 +1,6 @@
+- kernel: level1/95_CrossEntropyLoss.py
+  input_shapes: [32768x4096, 32768]
+  initializations: [rnd, "0"]
+  dtypes: [float32, int64]
+  output_shape: "1"
+  gflops: (32768 * 4096) / 1e9

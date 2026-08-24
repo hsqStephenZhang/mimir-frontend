@@ -160,6 +160,16 @@ def test_log_softmax_flip_and_narrow_match_eager():
     check_against_eager(SequenceHelpers(), torch.randn(2, 6))
 
 
+def test_cross_entropy_mean_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target):
+            return torch.nn.functional.cross_entropy(logits, target)
+
+    logits = torch.randn(8, 17)
+    target = torch.tensor([0, 3, 16, 4, 8, 1, 12, 6], dtype=torch.int64)
+    check_against_eager(Model(), logits, target)
+
+
 def test_leaky_relu_matches_eager():
     class LeakyRelu(torch.nn.Module):
         def forward(self, x):

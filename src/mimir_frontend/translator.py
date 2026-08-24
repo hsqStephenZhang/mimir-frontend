@@ -314,6 +314,8 @@ class FXGraphTranslator:
         m[torch.nn.functional.instance_norm] = self._wrap_instance_norm()
         m[torch.nn.functional.batch_norm] = self._wrap_functional_batch_norm()
         m[torch.nn.functional.smooth_l1_loss] = self._wrap_smooth_l1_loss()
+        m[torch.nn.functional.cross_entropy] = self._wrap_cross_entropy()
+        m["aten.cross_entropy_loss.default"] = self._wrap_cross_entropy()
         m[torch.nn.functional.kl_div] = self._wrap_kl_div()
         m[torch.nn.functional.triplet_margin_loss] = self._wrap_triplet_margin_loss()
         m["batch_norm"] = self._wrap_functional_batch_norm()
@@ -1248,6 +1250,42 @@ class FXGraphTranslator:
                     "smooth_l1_loss currently supports reduction='mean'"
                 )
             return self.ops.smooth_l1_mean(args[0], args[1], beta)
+        return convert
+
+    def _wrap_cross_entropy(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+
+            def argument(index, name, default):
+                return args[index] if len(args) > index else kwargs.get(name, default)
+
+            weight = argument(2, "weight", None)
+            size_average = argument(3, "size_average", None)
+            ignore_index = argument(4, "ignore_index", -100)
+            reduce = argument(5, "reduce", None)
+            reduction = argument(6, "reduction", "mean")
+            label_smoothing = argument(7, "label_smoothing", 0.0)
+            if weight is not None:
+                raise NotImplementedError("cross_entropy weight is not implemented")
+            if size_average is not None or reduce is not None:
+                raise NotImplementedError(
+                    "legacy cross_entropy size_average/reduce options are not implemented"
+                )
+            if ignore_index != -100:
+                raise NotImplementedError(
+                    "non-default cross_entropy ignore_index is not implemented"
+                )
+            if reduction != "mean":
+                raise NotImplementedError(
+                    "cross_entropy currently supports reduction='mean'"
+                )
+            if label_smoothing != 0.0:
+                raise NotImplementedError(
+                    "cross_entropy label_smoothing is not implemented"
+                )
+            return self.ops.cross_entropy_mean_2d(args[0], args[1])
+
         return convert
 
     def _wrap_kl_div(self):

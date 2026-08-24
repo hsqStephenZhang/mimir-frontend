@@ -182,6 +182,22 @@ def test_logsumexp_maps_directly_to_torch_semantics(keepdim):
     assert "%torch.reduction.logsumexp_dims" in def_to_string(result)
 
 
+def test_cross_entropy_maps_directly_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target):
+            return torch.nn.functional.cross_entropy(logits, target)
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    logits = make_static_inputs_with_shapes(world, [(4, 8)])[0]
+    target = make_static_inputs_with_shapes(
+        world, [(4,)], elem_type=ops.I64
+    )[0]
+    result = translate_model(Model(), [logits, target])
+
+    assert "%torch.loss.cross_entropy_mean_2d" in def_to_string(result)
+
+
 def test_torch_min_tensor_overload_maps_to_binary_minimum():
     class Model(torch.nn.Module):
         def forward(self, x, y):
