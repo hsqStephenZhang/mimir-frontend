@@ -336,9 +336,9 @@ def mimir_backend(
         if profile:
             # Phases only record spans while this flag is set (see mim Phase::run).
             driver.flags().profile = {
-                "summary": mim.Flags.Profile.Summary,
-                "tree": mim.Flags.Profile.Tree,
-                "trace": mim.Flags.Profile.Trace,
+                "summary": mim.Profile.Summary,
+                "tree": mim.Profile.Tree,
+                "trace": mim.Profile.Trace,
             }[profile]
 
         build_model_function(world, gm, input_shapes, name=name)

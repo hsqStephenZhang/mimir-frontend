@@ -644,11 +644,13 @@ def test_lenet_style_cnn_with_pooling_translates():
 @pytest.mark.parametrize(
     "dim,keepdim,expected_shape",
     [
-        (None, False, "((), (2, 3, 4))"),
-        (0, False, "((3, 4), (3, 4, 2))"),
-        (1, True, "((2, 1, 4), (2, 1, 4, 3))"),
-        ((1, 2), False, "(2, (2, 3, 4))"),
-        ((1, 2), True, "((2, 1, 1), (2, 1, 1, 3, 4))"),
+        # The (So, Sr, sched) group of %tensor.map_reduce_post ends with a schedule value,
+        # so only the leading `So, Sr,` prefix is matched.
+        (None, False, "((), (2, 3, 4),"),
+        (0, False, "((3, 4), (3, 4, 2),"),
+        (1, True, "((2, 1, 4), (2, 1, 4, 3),"),
+        ((1, 2), False, "(2, (2, 3, 4),"),
+        ((1, 2), True, "((2, 1, 1), (2, 1, 1, 3, 4),"),
     ],
 )
 def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape):
