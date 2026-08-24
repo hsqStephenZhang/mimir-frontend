@@ -51,7 +51,8 @@ import mimir_frontend.backend  # registers the "mimir" backend
 
 compiled = torch.compile(model, backend="mimir")
 # pass options={"debug_dir": "dbg/"} to keep the pre/post-optimize
-# MimIR dumps, emitted LLVM IR, and shared library per compiled graph
+# MimIR dumps, emitted LLVM IR, shared library, and compilation manifest
+# per compiled graph
 # pass options={"profile": "summary" | "tree" | "trace"} (or set MIMIR_PROFILE)
 # to report MimIR phase runtimes; "trace" writes chrome://tracing JSON
 # pass options={"max_fp_iters": N} (or set MIMIR_MAX_FP_ITERS) for large graphs
@@ -67,6 +68,12 @@ updates are atomic, invalid shared libraries are discarded and rebuilt, and
 non-debug temporary compilation directories are removed after each compile on
 POSIX systems. Windows retains successful build directories while their DLL is
 loaded.
+
+A debug directory also contains one `mimir_graph_*_manifest.json` per compiled
+graph. It records input/output shape and dtype metadata, the decomposition and
+fixed-point options, loaded plugins, cache/fingerprint identifiers, generated
+artifacts, and success or failure diagnostics. It deliberately excludes tensor
+values and model weights.
 
 ## Running Tests
 

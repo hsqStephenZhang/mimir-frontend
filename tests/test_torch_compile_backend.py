@@ -4,6 +4,7 @@ Each test lowers a Dynamo graph through MimIR to a shared library (requires
 clang on PATH) and compares the JIT-compiled result against eager PyTorch.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -1429,6 +1430,37 @@ def test_debug_dir_dumps_artifacts(tmp_path):
     for suffix in ("_pre.mim", "_post.mim", ".ll", LIB_SUFFIX):
         matches = list(tmp_path.glob(f"mimir_graph_*{suffix}"))
         assert matches, f"expected a mimir_graph_*{suffix} artifact in {tmp_path}"
+
+    manifests = list(tmp_path.glob("mimir_graph_*_manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["schema_version"] == 1
+    assert manifest["status"] == "succeeded"
+    assert {"shape": [4, 16], "dtype": "torch.float32"} in manifest["inputs"]
+    assert manifest["outputs"] == [
+        {"shape": [4, 8], "dtype": "torch.float32"}
+    ]
+    assert manifest["plugins"] == backend_module.EXEC_PLUGINS
+    assert not any("value" in tensor for tensor in manifest["inputs"])
+
+
+def test_debug_manifest_records_fixed_point_failure(tmp_path):
+    compiled = torch.compile(
+        LinearMLP(),
+        backend="mimir",
+        options={"debug_dir": str(tmp_path), "cache": False, "max_fp_iters": 1},
+    )
+
+    with pytest.raises(Exception, match="fixed point"):
+        compiled(torch.randn(4, 16))
+
+    manifests = list(tmp_path.glob("mimir_graph_*_manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["status"] == "failed"
+    assert manifest["options"]["max_fp_iters"] == 1
+    assert "fixed point" in manifest["error"]["message"]
+    assert manifest["error"]["type"]
 
 
 def test_cat_one_dimensional_empty_identity_matches_eager():

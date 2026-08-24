@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import math
 import os
 import platform
@@ -267,6 +268,40 @@ def _load_cached_library(path: Path):
 
 def _make_temporary_build_dir(name: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"{name}-"))
+
+
+def _write_debug_manifest(path: Path, payload: dict) -> None:
+    """Atomically publish compilation state without recording tensor values."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+
+
+def _tensor_manifest(shapes, dtypes) -> list[dict]:
+    return [
+        {"shape": list(shape), "dtype": str(dtype)}
+        for shape, dtype in zip(shapes, dtypes, strict=True)
+    ]
+
+
+def _decomposition_manifest(policy) -> dict[str, list[str]]:
+    return {
+        field: [_target_repr(operator) for operator in getattr(policy, field)]
+        for field in ("fallback", "preserve", "triggers")
+    }
+
+
+def _artifact_names(build_dir: Path, name: str) -> list[str]:
+    candidates = (
+        f"{name}_pre.mim",
+        f"{name}_post.mim",
+        f"{name}_failed.mim",
+        f"{name}.ll",
+        f"{name}{_shared_lib_suffix()}",
+        f"{name}_profile.txt",
+        f"{name}_profile.json",
+    )
+    return [candidate for candidate in candidates if (build_dir / candidate).exists()]
 
 
 def _emit_profile(driver, profile: str, build_dir: Path, name: str, debug_dir) -> None:
@@ -470,10 +505,33 @@ def mimir_backend(
 
     if lib is None:
         transient_build_dir = None
+        manifest_path = None
+        manifest = None
         if debug_dir:
-            build_dir = Path(debug_dir)
+            build_dir = Path(debug_dir).resolve()
             build_dir.mkdir(parents=True, exist_ok=True)
             print(f"[mimir] {name}: keeping compilation artifacts in {build_dir}", file=sys.stderr)
+            manifest_path = build_dir / f"{name}_manifest.json"
+            manifest = {
+                "schema_version": 1,
+                "name": name,
+                "cache_key": name.removeprefix("mimir_graph_"),
+                "mimir_fingerprint": _mim_fingerprint(),
+                "status": "prepared",
+                "inputs": _tensor_manifest(input_shapes, input_dtypes),
+                "outputs": _tensor_manifest(out_shapes, out_dtypes),
+                "plugins": EXEC_PLUGINS,
+                "options": {
+                    "cache": cache_enabled,
+                    "max_fp_iters": max_fp_iters,
+                    "profile": profile,
+                    "decomposition_policy": _decomposition_manifest(
+                        decomposition_policy
+                    ),
+                },
+                "artifacts": [],
+            }
+            _write_debug_manifest(manifest_path, manifest)
         else:
             build_dir = _make_temporary_build_dir(name)
             transient_build_dir = build_dir
@@ -506,6 +564,20 @@ def mimir_backend(
             # Keep the driver/world alive as long as the callable.
             keep_alive = driver
             completed = True
+            if manifest_path is not None:
+                manifest["status"] = "succeeded"
+                manifest["artifacts"] = _artifact_names(build_dir, name)
+                _write_debug_manifest(manifest_path, manifest)
+        except Exception as exc:
+            if manifest_path is not None:
+                manifest["status"] = "failed"
+                manifest["artifacts"] = _artifact_names(build_dir, name)
+                manifest["error"] = {
+                    "type": type(exc).__name__,
+                    "message": str(exc)[-4000:],
+                }
+                _write_debug_manifest(manifest_path, manifest)
+            raise
         finally:
             if transient_build_dir is not None and (
                 not completed or platform.system() != "Windows"
