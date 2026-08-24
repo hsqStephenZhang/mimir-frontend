@@ -128,6 +128,7 @@ class FXGraphTranslator:
 
         # Reductions
         m[torch.sum] = self._wrap_reduction(self.ops.sum)
+        m["sum"] = self._wrap_reduction(self.ops.sum)
         m["aten.sum.default"] = self._wrap_reduction(self.ops.sum)
         m["aten.sum.dim_IntList"] = self._wrap_reduction(self.ops.sum)
         m[torch.amax] = self._wrap_reduction(self.ops.amax)
@@ -136,6 +137,7 @@ class FXGraphTranslator:
         m["aten.max.default"] = self._wrap_max()
         m["aten.max.dim"] = self._wrap_max()
         m[torch.mean] = self._wrap_reduction(self.ops.mean)
+        m["mean"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
         m[torch.var_mean] = self._wrap_var_mean()
@@ -761,9 +763,9 @@ class FXGraphTranslator:
 def get_high_level_phase(world: mim.World) -> mim.Def:
     from mim._plugins.tensor import tensor as mim_tensor
     
-    internal_cleanup = world.annex(mim_compile.internal_cleanup.value)
+    cleanup = world.annex(mim_compile.cleanup.value)
     lower_tensor = world.annex(mim_tensor.lower_tensor.value)
     fuse_tensor = world.annex(mim_tensor.fuse_tensor.value)
     
-    phases = [internal_cleanup, lower_tensor, fuse_tensor, internal_cleanup]
+    phases = [cleanup, lower_tensor, fuse_tensor, cleanup]
     return world.call(mim_compile.phases, world.lit_bool(False), phases)

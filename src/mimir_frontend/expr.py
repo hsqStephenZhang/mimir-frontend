@@ -54,7 +54,8 @@ def bin(op_name, lhs, rhs):
     
     if _is_f32(world, t_lhs) and _is_f32(world, t_rhs):
         f32_config = world.annex(math.f32.value)
-        mode0 = world.lit_nat_0()
+        # mode0 = world.lit_nat_0()
+        mode80 = world.lit_nat(80)
         
         if op_name == "add":
             axm = world.annex(math.arith.add.value)
@@ -67,7 +68,7 @@ def bin(op_name, lhs, rhs):
         else:
             return NotImplemented
             
-        callee = world.app(world.app(axm, f32_config), mode0)
+        callee = world.app(world.app(axm, f32_config), mode80)
         return world.app(callee, [lhs_def, rhs_def])
 
     return NotImplemented

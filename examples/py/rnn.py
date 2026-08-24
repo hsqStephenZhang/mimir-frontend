@@ -1,7 +1,8 @@
+import os
+
 import torch
 
-from mimir_frontend.model_export import export
-
+import mimir_frontend.backend
 
 class TinyRNN(torch.nn.Module):
     def __init__(self):
@@ -14,10 +15,16 @@ class TinyRNN(torch.nn.Module):
         h = torch.ops.aten.addmm.default(self.b, x_t, self.wx) + torch.ops.aten.mm.default(h, self.wh)
         return torch.ops.aten.tanh.default(h)
 
+    @torch.compile(backend="mimir", options={"debug_dir": f"{os.path.dirname(os.path.realpath(__file__))}/../mim_debug"})
     def forward(self, x, h0):
         h = self.step(x[0], h0)
         h = self.step(x[1], h)
         return self.step(x[2], h)
 
-
-export_to_mim = export(TinyRNN(), input_shapes=[(3, 2, 5), (2, 7)], name="tiny_rnn")
+if __name__ == "__main__":
+    model = TinyRNN()
+    x = torch.randn(3, 2, 5)
+    h0 = torch.randn(2, 7)
+    with torch.no_grad():
+        want = model(x, h0)
+        print("compiled output:", want)

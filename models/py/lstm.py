@@ -39,3 +39,9 @@ class TinyLSTM(torch.nn.Module):
 
 
 export_to_mim = export(TinyLSTM(), input_shapes=[(3, 2, 5), (2, 7), (2, 7)], name="tiny_lstm")
+
+
+if __name__ == "__main__":
+    from mimir_frontend.model_export import run_spec_with_mimir
+
+    run_spec_with_mimir(export_to_mim)

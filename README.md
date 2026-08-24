@@ -27,6 +27,60 @@ mim = { path = "MimIR/build/mim_py_stage/main" }
 ```
 
 After editing MimIR locally, rebuild and resync with the same command.
+The build type defaults to `Release`; set `MIMIR_BUILD_TYPE=Debug` for a debug build
+(note that `world.optimize()` is drastically slower in debug builds).
+
+## Running Examples
+
+Each model in `models/py/` is runnable and JIT-compiles itself through the
+`"mimir"` `torch.compile` backend, checking the result against eager PyTorch:
+
+```bash
+uv run --no-sync python models/py/mlp.py
+```
+
+The same files also serve as declarative export specs: `export_to_mim` is
+consumed by `scripts/export_models_to_mimir.py` to write `.mim` files into
+`models/mim/`.
+
+To use the backend on your own model:
+
+```python
+import torch
+import mimir_frontend.backend  # registers the "mimir" backend
+
+compiled = torch.compile(model, backend="mimir")
+# pass options={"debug_dir": "dbg/"} to keep the pre/post-optimize
+# MimIR dumps and the emitted .ll/.so per compiled graph
+# pass options={"profile": "summary" | "tree" | "trace"} (or set MIMIR_PROFILE)
+# to report MimIR phase runtimes; "trace" writes chrome://tracing JSON
+```
+
+Compiled graphs are cached in `~/.cache/mimir-frontend/jit` keyed by the FX
+graph, input shapes, and a fingerprint of the MimIR installation (rebuilding
+MimIR invalidates the cache). Override the location with `MIMIR_CACHE_DIR` or
+`options={"cache_dir": ...}`; disable with `options={"cache": False}`.
+
+## Benchmarking
+
+`scripts/benchmark_backends.py` times the same model files (either
+`export_to_mim = export(...)` or the KernelBench `Model` + `get_inputs()` +
+`get_init_inputs()` layout) across eager, inductor, and the mimir backend on
+identical inputs, and reports per-backend first-call (compile) time,
+steady-state mean/min, speedup vs eager, and max abs error vs eager:
+
+```bash
+# all backends, single-threaded PyTorch for a fair comparison with the
+# (single-threaded) mimir runtime
+uv run --no-sync python scripts/benchmark_backends.py models/py/mlp.py --threads 1
+
+# a whole directory, mimir vs eager only, forcing a fresh mimir compile
+uv run --no-sync python scripts/benchmark_backends.py models/py --backends mimir,eager --no-cache
+```
+
+`--threads N` pins PyTorch's intra/inter-op thread pools (the OMP/MKL
+environment variables are set before torch is imported); without it, eager and
+inductor use all cores. `--repeat` controls the number of timed runs.
 
 ## Running Tests
 

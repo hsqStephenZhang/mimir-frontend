@@ -1,6 +1,8 @@
+import os
+
 import torch
 
-from mimir_frontend.model_export import export
+import mimir_frontend.backend
 
 
 class TinyLSTM(torch.nn.Module):
@@ -31,6 +33,7 @@ class TinyLSTM(torch.nn.Module):
         h = o * torch.ops.aten.tanh.default(c)
         return h, c
 
+    @torch.compile(backend="mimir", options={"debug_dir": f"{os.path.dirname(os.path.realpath(__file__))}/../mim_debug"})
     def forward(self, x, h0, c0):
         h, c = self.step(x[0], h0, c0)
         h, c = self.step(x[1], h, c)
@@ -38,4 +41,11 @@ class TinyLSTM(torch.nn.Module):
         return h
 
 
-export_to_mim = export(TinyLSTM(), input_shapes=[(3, 2, 5), (2, 7), (2, 7)], name="tiny_lstm")
+if __name__ == "__main__":
+    model = TinyLSTM()
+    x = torch.randn(3, 2, 5)
+    h0 = torch.randn(2, 7)
+    c0 = torch.randn(2, 7)
+    with torch.no_grad():
+        want = model(x, h0, c0)
+        print("compiled output:", want)

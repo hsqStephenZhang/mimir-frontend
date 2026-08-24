@@ -1,6 +1,8 @@
+import os
+
 import torch
 
-from mimir_frontend.model_export import export
+import mimir_frontend.backend
 
 
 class LeNet(torch.nn.Module):
@@ -13,6 +15,7 @@ class LeNet(torch.nn.Module):
         self.fc_w = torch.nn.Parameter(torch.randn(6 * 5 * 5, 10))
         self.fc_b = torch.nn.Parameter(torch.randn(10))
 
+    @torch.compile(backend="mimir", options={"debug_dir": f"{os.path.dirname(os.path.realpath(__file__))}/../mim_debug"})
     def forward(self, x):
         x = torch.ops.aten.convolution.default(
             x, self.conv0_w, self.conv0_b, [1, 1], [2, 2], [1, 1], False, [0, 0], 1
@@ -27,5 +30,9 @@ class LeNet(torch.nn.Module):
         x = torch.ops.aten.view.default(x, [2, 6 * 5 * 5])
         return torch.ops.aten.addmm.default(self.fc_b, x, self.fc_w)
 
-
-export_to_mim = export(LeNet(), input_shapes=[(2, 1, 28, 28)], name="lenet")
+if __name__ == "__main__":
+    model = LeNet()
+    x = torch.randn(2, 1, 28, 28)
+    with torch.no_grad():
+        want = model(x)
+        print("compiled output:", want)

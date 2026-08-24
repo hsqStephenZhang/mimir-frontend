@@ -20,7 +20,10 @@ else
     exit 1
 fi
 
-cmake -S "${MIMIR_DIR}" -B "${BUILD_DIR}" -DMIM_BUILD_PYTHON=ON -DPython_EXECUTABLE="${PYTHON_BIN}"
+cmake -S "${MIMIR_DIR}" -B "${BUILD_DIR}" \
+    -DCMAKE_BUILD_TYPE="${MIMIR_BUILD_TYPE:-Release}" \
+    -DMIM_BUILD_PYTHON=ON \
+    -DPython_EXECUTABLE="${PYTHON_BIN}"
 cmake --build "${BUILD_DIR}" --target mim_py -j "${MIMIR_BUILD_JOBS:-8}"
 
 cd "${ROOT_DIR}"

@@ -29,3 +29,9 @@ class LeNet(torch.nn.Module):
 
 
 export_to_mim = export(LeNet(), input_shapes=[(2, 1, 28, 28)], name="lenet")
+
+
+if __name__ == "__main__":
+    from mimir_frontend.model_export import run_spec_with_mimir
+
+    run_spec_with_mimir(export_to_mim)

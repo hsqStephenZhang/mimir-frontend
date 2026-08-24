@@ -35,6 +35,38 @@ def export(
     )
 
 
+def run_spec_with_mimir(
+    spec: ExportSpec,
+    *,
+    rtol: float = 1e-4,
+    atol: float = 1e-4,
+    debug_dir: str | Path | None = None,
+) -> float:
+    """JIT `spec.model` through the "mimir" torch.compile backend and check it against eager.
+
+    Draws random inputs from `spec.input_shapes` (which must be fully static),
+    prints a result line, and returns the maximum absolute error. Pass `debug_dir`
+    to keep the compilation artifacts (pre/post-optimize .mim dumps, .ll, .so).
+    """
+    import mimir_frontend.backend  # noqa: F401 - registers the "mimir" backend
+
+    for shape in spec.input_shapes:
+        if not all(isinstance(dim, int) for dim in shape):
+            raise ValueError(f"{spec.name}: symbolic input dims {tuple(shape)} are not supported by the JIT flow")
+    inputs = [torch.randn(*shape) for shape in spec.input_shapes]
+
+    options = {"debug_dir": str(debug_dir)} if debug_dir else None
+    with torch.no_grad():
+        want = spec.model(*inputs)
+        got = torch.compile(spec.model, backend="mimir", options=options)(*inputs)
+
+    torch.testing.assert_close(got, want, rtol=rtol, atol=atol)
+    pairs = zip(got, want) if isinstance(want, (tuple, list)) else [(got, want)]
+    err = max((g - w).abs().max().item() for g, w in pairs)
+    print(f"{spec.name}: mimir JIT matches eager (max abs err {err:.2e})")
+    return err
+
+
 def load_python_module(path: str | Path) -> ModuleType:
     path = Path(path)
     module_name = f"_mimir_export_{path.stem}"
