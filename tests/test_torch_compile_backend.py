@@ -13,9 +13,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from mimir_frontend.backend import EXEC_PLUGINS, mimir_backend
+import mimir_frontend.backend as backend_module
+from mimir_frontend.backend import EXEC_PLUGINS, _shared_lib_suffix, mimir_backend
 
 pytestmark = pytest.mark.skipif(shutil.which("clang") is None, reason="clang not on PATH")
+
+LIB_SUFFIX = _shared_lib_suffix()
 
 
 class LinearMLP(torch.nn.Module):
@@ -107,6 +110,9 @@ class TinyTransformerBlock(torch.nn.Module):
 def _reset_dynamo(monkeypatch, tmp_path_factory):
     # Hermetic per-test-run JIT cache: don't read from or pollute the user cache.
     monkeypatch.setenv("MIMIR_CACHE_DIR", str(tmp_path_factory.getbasetemp() / "mimir-jit-cache"))
+    monkeypatch.delenv("MIMIR_PROFILE", raising=False)
+    monkeypatch.delenv("MIMIR_DEBUG_DIR", raising=False)
+    monkeypatch.delenv("MIMIR_MAX_FP_ITERS", raising=False)
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()
@@ -1293,7 +1299,7 @@ def test_cache_hit_reuses_compiled_so(tmp_path):
         got_a = torch.compile(model_a, backend="mimir", options={"cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got_a, model_a(x), rtol=1e-4, atol=1e-4)
 
-    so_files = list(tmp_path.glob("*.so"))
+    so_files = list(tmp_path.glob(f"*{LIB_SUFFIX}"))
     assert len(so_files) == 1
     first_mtime = so_files[0].stat().st_mtime_ns
 
@@ -1305,7 +1311,7 @@ def test_cache_hit_reuses_compiled_so(tmp_path):
         got_b = torch.compile(model_b, backend="mimir", options={"cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got_b, model_b(x), rtol=1e-4, atol=1e-4)
 
-    so_files = list(tmp_path.glob("*.so"))
+    so_files = list(tmp_path.glob(f"*{LIB_SUFFIX}"))
     assert len(so_files) == 1
     assert so_files[0].stat().st_mtime_ns == first_mtime, "cache entry was rebuilt instead of reused"
     assert not torch.allclose(got_a, got_b), "different weights must give different results"
@@ -1317,7 +1323,41 @@ def test_cache_can_be_disabled(tmp_path):
     with torch.no_grad():
         got = torch.compile(model, backend="mimir", options={"cache": False, "cache_dir": str(tmp_path)})(x)
         torch.testing.assert_close(got, model(x), rtol=1e-4, atol=1e-4)
-    assert not list(tmp_path.glob("*.so"))
+    assert not list(tmp_path.glob(f"*{LIB_SUFFIX}"))
+
+
+def test_transient_build_directory_is_removed(tmp_path, monkeypatch):
+    build_dir = tmp_path / "transient-build"
+
+    def make_build_dir(_name):
+        build_dir.mkdir()
+        return build_dir
+
+    monkeypatch.setattr(backend_module, "_make_temporary_build_dir", make_build_dir)
+    check_against_eager(
+        LinearMLP(), torch.randn(4, 16), options={"cache": False}
+    )
+    assert not build_dir.exists()
+
+
+def test_transient_build_directory_is_removed_after_failure(
+    tmp_path, monkeypatch
+):
+    build_dir = tmp_path / "failed-build"
+
+    def make_build_dir(_name):
+        build_dir.mkdir()
+        return build_dir
+
+    monkeypatch.setattr(backend_module, "_make_temporary_build_dir", make_build_dir)
+    compiled = torch.compile(
+        LinearMLP(),
+        backend="mimir",
+        options={"cache": False, "max_fp_iters": 1},
+    )
+    with pytest.raises(Exception, match="fixed point"):
+        compiled(torch.randn(4, 16))
+    assert not build_dir.exists()
 
 
 def test_max_fp_iters_option_reaches_driver_flags(tmp_path):
@@ -1386,7 +1426,7 @@ def test_debug_dir_dumps_artifacts(tmp_path):
         want = model(x)
     torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
 
-    for suffix in ("_pre.mim", "_post.mim", ".ll", ".so"):
+    for suffix in ("_pre.mim", "_post.mim", ".ll", LIB_SUFFIX):
         matches = list(tmp_path.glob(f"mimir_graph_*{suffix}"))
         assert matches, f"expected a mimir_graph_*{suffix} artifact in {tmp_path}"
 

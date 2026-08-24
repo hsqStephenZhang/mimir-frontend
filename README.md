@@ -51,15 +51,22 @@ import mimir_frontend.backend  # registers the "mimir" backend
 
 compiled = torch.compile(model, backend="mimir")
 # pass options={"debug_dir": "dbg/"} to keep the pre/post-optimize
-# MimIR dumps and the emitted .ll/.so per compiled graph
+# MimIR dumps, emitted LLVM IR, and shared library per compiled graph
 # pass options={"profile": "summary" | "tree" | "trace"} (or set MIMIR_PROFILE)
 # to report MimIR phase runtimes; "trace" writes chrome://tracing JSON
+# pass options={"max_fp_iters": N} (or set MIMIR_MAX_FP_ITERS) for large graphs
+# pass options={"decomposition_policy": "mimir" | "none"} to select the
+# frontend decomposition boundary
 ```
 
 Compiled graphs are cached in `~/.cache/mimir-frontend/jit` keyed by the FX
 graph, input shapes, and a fingerprint of the MimIR installation (rebuilding
 MimIR invalidates the cache). Override the location with `MIMIR_CACHE_DIR` or
-`options={"cache_dir": ...}`; disable with `options={"cache": False}`.
+`options={"cache_dir": ...}`; disable with `options={"cache": False}`. Cache
+updates are atomic, invalid shared libraries are discarded and rebuilt, and
+non-debug temporary compilation directories are removed after each compile on
+POSIX systems. Windows retains successful build directories while their DLL is
+loaded.
 
 ## Running Tests
 

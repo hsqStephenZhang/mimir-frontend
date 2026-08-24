@@ -26,7 +26,7 @@ Debugging: pass ``options={"debug_dir": "some/dir"}`` to ``torch.compile`` (or
 set the ``MIMIR_DEBUG_DIR`` environment variable) to keep all per-graph
 compilation artifacts in that directory, including a dump of the MimIR world
 before (`<name>_pre.mim`) and after (`<name>_post.mim`) `world.optimize()`,
-alongside the emitted `<name>.ll` and `<name>.so`.
+alongside the emitted `<name>.ll` and platform shared library.
 
 Profiling: pass ``options={"profile": "summary" | "tree" | "trace"}`` (or set
 ``MIMIR_PROFILE``) to record MimIR phase runtimes during `world.optimize()`.
@@ -45,7 +45,7 @@ Large graphs can raise the generic MimIR fixed-point guard with
 ``options={"max_fp_iters": N}`` (or ``MIMIR_MAX_FP_ITERS``). The compiler
 default remains unchanged when neither is supplied.
 
-Caching: compiled `.so` files are reused across processes from
+Caching: compiled shared libraries are reused across processes from
 ``~/.cache/mimir-frontend/jit`` (override with ``options={"cache_dir": ...}``
 or ``MIMIR_CACHE_DIR``; disable with ``options={"cache": False}``). The cache
 key hashes the canonicalized FX graph and input shapes together with a
@@ -115,9 +115,9 @@ _LIBC = _load_crt()
 _LIBC.free.argtypes = [ctypes.c_void_p]
 _LIBC.free.restype = None
 
-# %ll.emit and mim.JIT write `<name>.ll`/`<name>.so` to the current directory,
-# so compilation chdirs into a scratch dir; the lock keeps that process-global
-# state change safe.
+# %ll.emit and mim.JIT write LLVM/shared-library artifacts relative to the
+# current directory, so compilation chdirs into a scratch dir; the lock keeps
+# that process-global state change safe.
 _compile_lock = threading.Lock()
 
 
@@ -254,6 +254,21 @@ def _cache_store(cache_dir: Path, sources: list[Path]) -> None:
             tmp.unlink(missing_ok=True)
 
 
+def _load_cached_library(path: Path):
+    """Load a cache entry, discarding an invalid shared library."""
+    try:
+        return ctypes.cdll.LoadLibrary(str(path))
+    except OSError:
+        # Atomic publication prevents partial writes, but external changes or
+        # an incomplete environment fingerprint can still stale an entry.
+        path.unlink(missing_ok=True)
+        return None
+
+
+def _make_temporary_build_dir(name: str) -> Path:
+    return Path(tempfile.mkdtemp(prefix=f"{name}-"))
+
+
 def _emit_profile(driver, profile: str, build_dir: Path, name: str, debug_dir) -> None:
     """Publish all completed phase spans, including those from failed compiles."""
     report = {
@@ -342,6 +357,38 @@ def _output_tensors_from_metadata(container) -> list[torch.Tensor]:
     return outputs
 
 
+def _compile_world(driver, world, build_dir: Path, name: str, debug_dir, profile):
+    """Optimize, emit, and load one graph while cwd points at its build dir."""
+    try:
+        with _compile_lock:
+            old_cwd = os.getcwd()
+            os.chdir(build_dir)
+            try:
+                if debug_dir:
+                    world.set(f"{name}_pre")
+                    world.write()
+                world.set(name)
+                try:
+                    world.optimize()
+                except Exception:
+                    if debug_dir:
+                        world.set(f"{name}_failed")
+                        world.write()
+                    raise
+                if debug_dir:
+                    world.set(f"{name}_post")
+                    world.write()
+                jit = mim.JIT(name, [name])
+                lib = jit.compile_and_load()
+                built_lib = Path(jit._get_so_path()).resolve()
+            finally:
+                os.chdir(old_cwd)
+    finally:
+        if profile:
+            _emit_profile(driver, profile, build_dir, name, debug_dir)
+    return lib, built_lib
+
+
 def mimir_backend(
     gm: fx.GraphModule,
     example_inputs: list[torch.Tensor],
@@ -419,22 +466,26 @@ def mimir_backend(
     lib = keep_alive = None
     # debug_dir and profile both require an actual compile to observe.
     if cache_enabled and not debug_dir and not profile and cached_so.exists():
-        lib = ctypes.cdll.LoadLibrary(str(cached_so))
+        lib = _load_cached_library(cached_so)
 
     if lib is None:
+        transient_build_dir = None
         if debug_dir:
             build_dir = Path(debug_dir)
             build_dir.mkdir(parents=True, exist_ok=True)
             print(f"[mimir] {name}: keeping compilation artifacts in {build_dir}", file=sys.stderr)
         else:
-            build_dir = Path(tempfile.mkdtemp(prefix=f"{name}-"))
+            build_dir = _make_temporary_build_dir(name)
+            transient_build_dir = build_dir
 
-        driver = mim.Driver()
-        driver.load_plugins(EXEC_PLUGINS)
-        if max_fp_iters is not None:
-            driver.flags().max_fp_iters = max_fp_iters
-        world = driver.world()
-        if profile:
+        completed = False
+        try:
+            driver = mim.Driver()
+            driver.load_plugins(EXEC_PLUGINS)
+            if max_fp_iters is not None:
+                driver.flags().max_fp_iters = max_fp_iters
+            world = driver.world()
+            if profile:
                 # Phases only record spans while this flag is set (see mim Phase::run).
                 driver.flags().profile = {
                     "summary": mim.Profile.Summary,
@@ -442,47 +493,24 @@ def mimir_backend(
                     "trace": mim.Profile.Trace,
                 }[profile]
 
-        build_model_function(
-            world, gm, input_shapes, input_dtypes=input_dtypes, name=name
-        )
-        install_execution_compile_phase(world)
+            build_model_function(
+                world, gm, input_shapes, input_dtypes=input_dtypes, name=name
+            )
+            install_execution_compile_phase(world)
+            lib, built_lib = _compile_world(
+                driver, world, build_dir, name, debug_dir, profile
+            )
 
-        try:
-            with _compile_lock:
-                old_cwd = os.getcwd()
-                os.chdir(build_dir)
-                try:
-                    if debug_dir:
-                        # world.write() dumps the world to `<world name>.mim` in cwd.
-                        world.set(f"{name}_pre")
-                        world.write()
-                    # The opt plugin's default pipeline ends in %ll.emit -> `<name>.ll`.
-                    world.set(name)
-                    try:
-                        world.optimize()
-                    except Exception:
-                        if debug_dir:
-                            world.set(f"{name}_failed")
-                            world.write()
-                        raise
-                    if debug_dir:
-                        world.set(f"{name}_post")
-                        world.write()
-                    jit = mim.JIT(name, [name])
-                    lib = jit.compile_and_load()
-                    # Resolve while still chdir'd: on POSIX the JIT builds
-                    # `./<name>.so` in cwd, on Windows a DLL in a temp dir.
-                    built_lib = Path(jit._get_so_path()).resolve()
-                finally:
-                    os.chdir(old_cwd)
+            if cache_enabled:
+                _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])
+            # Keep the driver/world alive as long as the callable.
+            keep_alive = driver
+            completed = True
         finally:
-            if profile:
-                _emit_profile(driver, profile, build_dir, name, debug_dir)
-
-        if cache_enabled:
-            _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])
-        # Keep the driver/world alive as long as the callable.
-        keep_alive = driver
+            if transient_build_dir is not None and (
+                not completed or platform.system() != "Windows"
+            ):
+                shutil.rmtree(transient_build_dir, ignore_errors=True)
 
     fn = lib[name]
     scalar_input = [all(extent == 1 for extent in shape) for shape in input_shapes]
