@@ -1192,6 +1192,84 @@ def test_triplet_margin_reduced_matches_eager(reduction, swap):
     )
 
 
+@pytest.mark.parametrize("reduction", ["none", "sum"])
+def test_smooth_l1_broadcast_reductions_match_eager(reduction):
+    class Model(torch.nn.Module):
+        def forward(self, x, target):
+            return torch.nn.functional.smooth_l1_loss(
+                x, target, reduction=reduction, beta=0.25
+            )
+
+    check_against_eager(Model(), torch.randn(3, 5), torch.randn(1, 5))
+
+
+def test_kl_div_none_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x, target):
+            return torch.nn.functional.kl_div(
+                x, target, reduction="none", log_target=True
+            )
+
+    check_against_eager(Model(), torch.randn(3, 5), torch.randn(3, 5))
+
+
+def test_triplet_margin_rank1_none_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor, positive, negative, margin=0.5, p=1.5,
+                eps=1e-6, swap=True, reduction="none",
+            )
+
+    check_against_eager(Model(), *(torch.randn(7) for _ in range(3)))
+
+
+def test_cross_entropy_rank4_weight_ignore_smoothing_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target, weight):
+            return torch.nn.functional.cross_entropy(
+                logits, target, weight, reduction="none",
+                ignore_index=4, label_smoothing=0.1,
+            )
+
+    target = torch.randint(0, 5, (2, 3, 4), dtype=torch.int64)
+    target[0, 0, 0] = 4
+    check_against_eager(Model(), torch.randn(2, 5, 3, 4), target, torch.rand(5))
+
+
+def test_cross_entropy_probability_target_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target, weight):
+            return torch.nn.functional.cross_entropy(
+                logits, target, weight, reduction="sum", label_smoothing=0.2
+            )
+
+    logits = torch.randn(2, 5, 3, 4)
+    target = torch.softmax(torch.randn_like(logits), dim=1)
+    check_against_eager(Model(), logits, target, torch.rand(5))
+
+
+def test_adaptive_pool_nondivisible_unbatched_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x1, x3):
+            return (
+                torch.nn.functional.adaptive_avg_pool1d(x1, 3),
+                torch.nn.functional.adaptive_avg_pool3d(x3, (3, 2, 4)),
+            )
+
+    check_against_eager(Model(), torch.randn(2, 5), torch.randn(2, 5, 4, 7))
+
+
+def test_batch_norm_training_without_running_stats_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.batch_norm(
+                x, None, None, training=True, momentum=0.25, eps=1e-5
+            )
+
+    check_against_eager(Model(), torch.randn(2, 3, 4, 5))
+
+
 def test_pytorch_fallback_decomposition_matches_eager():
     class HardSwishLayerNorm(torch.nn.Module):
         def __init__(self):

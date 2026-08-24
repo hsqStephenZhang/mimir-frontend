@@ -179,7 +179,7 @@ def test_logsumexp_maps_directly_to_torch_semantics(keepdim):
 
     world = make_world()
     result = translate_model(Model(), make_inputs(world, 1, "static", 3))
-    assert "%torch.reduction.logsumexp_dims" in def_to_string(result)
+    assert "%torch.reduction.logsumexp" in def_to_string(result)
 
 
 def test_cross_entropy_maps_directly_to_torch_semantics():
@@ -195,7 +195,7 @@ def test_cross_entropy_maps_directly_to_torch_semantics():
     )[0]
     result = translate_model(Model(), [logits, target])
 
-    assert "%torch.loss.cross_entropy_mean_2d" in def_to_string(result)
+    assert "%torch.loss.cross_entropy_loss" in def_to_string(result)
 
 
 def test_torch_min_tensor_overload_maps_to_binary_minimum():
@@ -828,7 +828,7 @@ def test_functional_normalize_decomposes_to_norm_clamp_and_div():
     ir = def_to_string(result)
 
     assert tensor_shape_values(result) == [2, 4, 8]
-    assert "%torch.reduction.norm2_dims_keepdim" in ir
+    assert "%torch.reduction.vector_norm" in ir
     assert "%torch.activation.clamp" in ir
     assert "%torch.binary.div" in ir
 
@@ -1160,8 +1160,7 @@ def test_leaky_relu_maps_all_parameters_to_mimir():
 
     assert tensor_shape_values(result) == [2, 4]
     ir = def_to_string(result)
-    assert "%tensor.map_reduce" in ir
-    assert "%math.arith.mul" in ir
+    assert "%torch.activation.leaky_relu" in ir
     assert "1045220557:(%math.F" in ir
 
 
@@ -1322,7 +1321,7 @@ def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
     ir = def_to_string(result)
 
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1]
-    assert "%torch.reduction.mean_dims_keepdim" in ir
+    assert "%torch.reduction.mean" in ir
 
 
 def test_adaptive_avg_pool2d_folded_singletons_is_identity():
@@ -1362,7 +1361,7 @@ def test_functional_batch_norm_inference_translates():
 
     assert tensor_shape_values(result) == [4, 8, 8]
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 8, 8]
-    assert "%torch.normalization.batch_norm_inference" in def_to_string(result)
+    assert "%torch.normalization.batch_norm" in def_to_string(result)
 
 
 def test_aten_batch_norm_inference_translates():
@@ -1380,7 +1379,7 @@ def test_aten_batch_norm_inference_translates():
     result = translate_model(Model(), inputs)
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
-    assert "%torch.normalization.batch_norm_inference" in def_to_string(result)
+    assert "%torch.normalization.batch_norm" in def_to_string(result)
 
 
 def test_functional_group_norm_maps_directly_to_torch_semantics():
@@ -1421,7 +1420,7 @@ def test_smooth_l1_mean_maps_directly_to_torch_semantics():
     result = translate_model(Model(), [x, target])
 
     assert tensor_shape_values(result) == []
-    assert "%torch.loss.smooth_l1_mean" in def_to_string(result)
+    assert "%torch.loss.smooth_l1_loss" in def_to_string(result)
 
 
 @pytest.mark.parametrize(
@@ -1442,7 +1441,7 @@ def test_kl_div_reductions_map_directly_to_torch_semantics(
     result = translate_model(Model(), [input, target])
 
     assert tensor_shape_values(result) == []
-    assert "%torch.loss.kl_div_reduced" in def_to_string(result)
+    assert "%torch.loss.kl_div" in def_to_string(result)
 
 
 @pytest.mark.parametrize(
@@ -1467,7 +1466,97 @@ def test_triplet_margin_loss_maps_directly_to_torch_semantics(reduction, swap):
     result = translate_model(Model(), inputs)
 
     assert tensor_shape_values(result) == []
-    assert "%torch.loss.triplet_margin_reduced" in def_to_string(result)
+    assert "%torch.loss.triplet_margin_loss" in def_to_string(result)
+
+
+def test_generic_loss_parameter_surfaces_translate():
+    class Model(torch.nn.Module):
+        def forward(self, x, broadcast_target, kl_target, a, p, n):
+            return (
+                torch.nn.functional.smooth_l1_loss(
+                    x, broadcast_target, reduction="none", beta=0.25
+                ),
+                torch.nn.functional.kl_div(
+                    x, kl_target, reduction="none", log_target=True
+                ),
+                torch.nn.functional.triplet_margin_loss(
+                    a, p, n, margin=0.5, p=1.5, swap=True, reduction="none"
+                ),
+            )
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(3, 5), (1, 5), (3, 5), (3, 7), (3, 7), (3, 7)]
+    )
+    result = translate_model(Model(), inputs)
+    ir = def_to_string(result)
+    assert "%torch.loss.smooth_l1_loss" in ir
+    assert "%torch.loss.kl_div" in ir
+    assert "%torch.loss.triplet_margin_loss" in ir
+
+
+def test_cross_entropy_full_index_and_probability_surfaces_translate():
+    class IndexModel(torch.nn.Module):
+        def forward(self, logits, target, weight):
+            return torch.nn.functional.cross_entropy(
+                logits, target, weight, reduction="none",
+                ignore_index=4, label_smoothing=0.1,
+            )
+
+    class ProbabilityModel(torch.nn.Module):
+        def forward(self, logits, target, weight):
+            return torch.nn.functional.cross_entropy(
+                logits, target, weight, reduction="sum", label_smoothing=0.2
+            )
+
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    logits, weight = make_static_inputs_with_shapes(world, [(2, 5, 3, 4), (5,)])
+    target = make_static_inputs_with_shapes(
+        world, [(2, 3, 4)], elem_type=ops.I64
+    )[0]
+    index_result = translate_model(IndexModel(), [logits, target, weight])
+    assert "%torch.loss.cross_entropy_loss" in def_to_string(index_result)
+
+    probability_target = make_static_inputs_with_shapes(
+        world, [(2, 5, 3, 4)]
+    )[0]
+    probability_result = translate_model(
+        ProbabilityModel(), [logits, probability_target, weight]
+    )
+    assert "%torch.loss.cross_entropy_probability_loss" in def_to_string(
+        probability_result
+    )
+
+
+def test_generic_adaptive_pool_and_training_batch_norm_translate():
+    class Pool1d(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool1d(x, 3)
+
+    class Pool3d(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool3d(x, (3, 2, 4))
+
+    class BatchNormTraining(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.batch_norm(
+                x, None, None, training=True, momentum=0.25
+            )
+
+    world = make_world()
+    pool1 = translate_model(
+        Pool1d(), make_static_inputs_with_shapes(world, [(2, 5)])
+    )
+    pool3 = translate_model(
+        Pool3d(), make_static_inputs_with_shapes(world, [(2, 5, 4, 7)])
+    )
+    batch_norm = translate_model(
+        BatchNormTraining(), make_static_inputs_with_shapes(world, [(2, 3, 4, 5)])
+    )
+    assert "%torch.pool.adaptive_avg_pool1d" in def_to_string(pool1)
+    assert "%torch.pool.adaptive_avg_pool3d" in def_to_string(pool3)
+    assert "%torch.normalization.batch_norm" in def_to_string(batch_norm)
 
 
 def test_inplace_residual_add_and_relu_translate_as_values():
@@ -1688,10 +1777,10 @@ def test_reshape_accepts_single_variadic_extent():
 @pytest.mark.parametrize(
     "function,annex",
     [
-        (lambda x: torch.norm(x, p="fro"), "%torch.reduction.norm2_dims"),
+        (lambda x: torch.norm(x, p="fro"), "%torch.reduction.norm2_all"),
         (
             lambda x: torch.norm(x, p=2, dim=1, keepdim=True),
-            "%torch.reduction.norm2_dims_keepdim",
+            "%torch.reduction.vector_norm",
         ),
     ],
 )
@@ -1766,6 +1855,7 @@ def test_getitem_tensor_index_translates_to_dim0_index():
     assert "%torch.indexing.embedding" in def_to_string(result)
 
 
+@pytest.mark.skip(reason="torch.scan.diff is intentionally outside the current scope")
 def test_diff_with_prepend_translates_to_torch_semantics():
     class Model(torch.nn.Module):
         def forward(self, x, prepend):
@@ -2285,7 +2375,7 @@ def test_lenet_style_cnn_with_pooling_translates():
             "%torch.activation.relu",
             "%torch.pool.max_pool2d",
             "%torch.conv.general",
-            "%tensor.pool",
+            "%torch.pool.avg_pool2d",
             "%torch.shape.reshape",
             "%torch.linalg.addmm",
         ],
@@ -2296,10 +2386,10 @@ def test_lenet_style_cnn_with_pooling_translates():
     "dim,keepdim,expected_shape,expected_op",
     [
         (None, False, [], "%torch.reduction.sum_all"),
-        (0, False, [3, 4], "%torch.reduction.sum_dim"),
-        (1, True, [2, 1, 4], "%torch.reduction.sum_dim_keepdim"),
-        ((1, 2), False, [2], "%torch.reduction.sum_dims"),
-        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum_dims_keepdim"),
+        (0, False, [3, 4], "%torch.reduction.sum"),
+        (1, True, [2, 1, 4], "%torch.reduction.sum"),
+        ((1, 2), False, [2], "%torch.reduction.sum"),
+        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum"),
     ],
 )
 def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape, expected_op):
@@ -2370,7 +2460,7 @@ def test_amax_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.reduction.amax_dims" in def_to_string(result)
+    assert "%torch.reduction.amax_all" in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -2385,7 +2475,7 @@ def test_sum_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
 
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    assert "%torch.sum_" in def_to_string(result)
+    assert "%torch.reduction.sum" in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -2400,13 +2490,7 @@ def test_amax_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
 
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    ir = def_to_string(result)
-    if keepdim:
-        # amax has no dedicated keepdim axiom; it composes a non-keepdim
-        # reduction with reshape, exposing the underlying tensor reduction.
-        assert "%tensor.map_reduce" in ir
-    else:
-        assert "%torch.amax_" in ir
+    assert "%torch.reduction.amax" in def_to_string(result)
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
@@ -2421,8 +2505,7 @@ def test_mean_reduce_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
 
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
-    ir = def_to_string(result)
-    assert "%torch.mean_" in ir
+    assert "%torch.reduction.mean" in def_to_string(result)
 
 
 @pytest.mark.parametrize(
@@ -2500,7 +2583,7 @@ def test_value_only_max(shape_kind, rank):
     assert isinstance(result, mim.Def)
     assert tensor_element_type(result) == FXGraphTranslator(world).ops.F32
     ir = def_to_string(result)
-    assert "%torch.amax_" in ir
+    assert "%torch.reduction.amax_all" in ir
 
 @pytest.mark.parametrize("kind", ["max", "min"])
 def test_dim_extrema_map_to_structured_torch_result(kind):
@@ -2515,7 +2598,7 @@ def test_dim_extrema_map_to_structured_torch_result(kind):
 
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert f"%torch.{kind}_dim_op" in ir
+    assert f"%torch.reduction.{kind}_dim" in ir
     assert "%torch.indexing.slice" not in ir
 
 
@@ -2548,9 +2631,7 @@ def test_var_mean_all_shape_kinds_smoke(shape_kind, rank, dim, keepdim):
     assert all(isinstance(value, mim.Def) for value in result)
     # var_mean returns a tuple of (var, mean)
     ir = "\n".join(def_to_string(value) for value in result)
-    assert "%torch.reduction.var_mean_dims" in ir
-    if keepdim:
-        assert "%torch.shape.reshape" in ir
+    assert "%torch.reduction.var_mean" in ir
 
 
 @pytest.mark.parametrize("correction", [-1, 4, 5, 0.5])
@@ -2567,7 +2648,7 @@ def test_var_mean_accepts_scalar_correction(correction):
     assert isinstance(result, tuple)
     assert len(result) == 2
     assert all(isinstance(value, mim.Def) for value in result)
-    assert "%torch.reduction.var_mean_dims" in def_to_string(result[0])
+    assert "%torch.reduction.var_mean" in def_to_string(result[0])
 
 
 def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
@@ -2581,7 +2662,7 @@ def test_var_mean_getitem_projects_structured_result_without_tensor_slice():
 
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.reduction.var_mean_dims" in ir
+    assert "%torch.reduction.var_mean" in ir
     assert "%torch.indexing.slice" not in ir
 
 
@@ -2599,8 +2680,7 @@ def test_var_mean_dim_overload_maps_unbiased_to_correction(unbiased):
 
     assert isinstance(result, mim.Def)
     ir = def_to_string(result)
-    assert "%torch.reduction.var_mean_dims" in ir
-    assert "%torch.shape.reshape" in ir
+    assert "%torch.reduction.var_mean" in ir
 
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])

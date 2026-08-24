@@ -1183,11 +1183,11 @@ class FXGraphTranslator:
             weight = args[3] if len(args) > 3 else kwargs.get("weight")
             bias = args[4] if len(args) > 4 else kwargs.get("bias")
             training = args[5] if len(args) > 5 else kwargs.get("training", False)
+            momentum = args[6] if len(args) > 6 else kwargs.get("momentum", 0.1)
             eps = args[7] if len(args) > 7 else kwargs.get("eps", 1e-5)
-            if training:
-                raise NotImplementedError("batch_norm training mode is not implemented")
-            return self.ops.batch_norm_inference(
-                input_def, running_mean, running_var, weight, bias, eps
+            return self.ops.batch_norm(
+                input_def, running_mean, running_var, weight, bias,
+                training, momentum, eps, True,
             )
         return convert
 
@@ -1245,11 +1245,9 @@ class FXGraphTranslator:
             kwargs = self._retrieve_args(node.kwargs)
             reduction = args[2] if len(args) > 2 else kwargs.get("reduction", "mean")
             beta = args[3] if len(args) > 3 else kwargs.get("beta", 1.0)
-            if reduction != "mean":
-                raise NotImplementedError(
-                    "smooth_l1_loss currently supports reduction='mean'"
-                )
-            return self.ops.smooth_l1_mean(args[0], args[1], beta)
+            return self.ops.smooth_l1_loss(
+                args[0], args[1], reduction, beta
+            )
         return convert
 
     def _wrap_cross_entropy(self):
@@ -1266,25 +1264,14 @@ class FXGraphTranslator:
             reduce = argument(5, "reduce", None)
             reduction = argument(6, "reduction", "mean")
             label_smoothing = argument(7, "label_smoothing", 0.0)
-            if weight is not None:
-                raise NotImplementedError("cross_entropy weight is not implemented")
             if size_average is not None or reduce is not None:
                 raise NotImplementedError(
                     "legacy cross_entropy size_average/reduce options are not implemented"
                 )
-            if ignore_index != -100:
-                raise NotImplementedError(
-                    "non-default cross_entropy ignore_index is not implemented"
-                )
-            if reduction != "mean":
-                raise NotImplementedError(
-                    "cross_entropy currently supports reduction='mean'"
-                )
-            if label_smoothing != 0.0:
-                raise NotImplementedError(
-                    "cross_entropy label_smoothing is not implemented"
-                )
-            return self.ops.cross_entropy_mean_2d(args[0], args[1])
+            return self.ops.cross_entropy_loss(
+                args[0], args[1], weight, reduction,
+                ignore_index, label_smoothing,
+            )
 
         return convert
 
@@ -1306,7 +1293,7 @@ class FXGraphTranslator:
             log_target = (
                 args[5] if len(args) > 5 else kwargs.get("log_target", False)
             )
-            return self.ops.kl_div_reduced(
+            return self.ops.kl_div(
                 args[0], args[1], reduction, log_target
             )
         return convert
@@ -1325,7 +1312,7 @@ class FXGraphTranslator:
                 raise NotImplementedError(
                     "legacy triplet size_average/reduce options are not implemented"
                 )
-            return self.ops.triplet_margin_reduced(
+            return self.ops.triplet_margin_loss(
                 args[0],
                 args[1],
                 args[2],
@@ -1347,11 +1334,12 @@ class FXGraphTranslator:
             running_mean = args[3] if len(args) > 3 else kwargs.get("running_mean")
             running_var = args[4] if len(args) > 4 else kwargs.get("running_var")
             training = args[5] if len(args) > 5 else kwargs.get("training", False)
+            momentum = args[6] if len(args) > 6 else kwargs.get("momentum", 0.1)
             eps = args[7] if len(args) > 7 else kwargs.get("eps", 1e-5)
-            if training:
-                raise NotImplementedError("batch_norm training mode is not implemented")
-            return self.ops.batch_norm_inference(
-                input_def, running_mean, running_var, weight, bias, eps
+            cudnn_enabled = args[8] if len(args) > 8 else kwargs.get("cudnn_enabled", True)
+            return self.ops.batch_norm(
+                input_def, running_mean, running_var, weight, bias,
+                training, momentum, eps, cudnn_enabled,
             )
         return convert
 

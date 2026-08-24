@@ -1362,13 +1362,13 @@ class OperatorLibrary:
         """
         Translates to maximum reduction via `%tensor.map_reduce`.
         """
-        if keepdim:
-            return self._reduce_aff(input, self.F32, self._f32_reduce_lambda(self.f32_max_axm), self._f32_float_lit(-float("inf")), dim=dim, keepdim=True)
         return self._torch_reduce("amax", input, dim, keepdim)
 
     def norm(self, input, p="fro", dim=None, keepdim=False, dtype=None):
-        """Map the L2/Frobenius cases of `torch.norm` to MimIR semantics."""
-        if p not in (2, 2.0, "fro"):
+        """Map finite and +/-infinity vector norms to MimIR semantics."""
+        if p == "fro":
+            p = 2.0
+        if not isinstance(p, (int, float)):
             raise NotImplementedError(f"torch.norm p={p!r} is not implemented")
         if dtype is not None:
             raise NotImplementedError("torch.norm dtype conversion is not implemented")
@@ -1398,9 +1398,11 @@ class OperatorLibrary:
             physical_axes.index(axis) for axis in canonical if axis in physical_axes
         ]
         if not reduced_axes:
+            if p == 0:
+                raise NotImplementedError("norm over only folded axes is unsupported")
             return self._remember_shape(self.abs(input), output_dims)
 
-        if not keepdim and len(reduced_axes) == len(physical_dims):
+        if p == 2 and not keepdim and len(reduced_axes) == len(physical_dims):
             callee = self.world.annex(torch_dialect.reduction.norm2_all.value)
             callee = self.world.app(
                 callee, self._torch_semantics(input, floating=True)
@@ -1412,12 +1414,7 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, [])
 
-        op = (
-            torch_dialect.reduction.norm2_dims_keepdim
-            if keepdim
-            else torch_dialect.reduction.norm2_dims
-        )
-        callee = self.world.annex(op.value)
+        callee = self.world.annex(torch_dialect.reduction.vector_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -1427,10 +1424,11 @@ class OperatorLibrary:
                 self.world.tuple(physical_dims),
             ],
         )
-        callee = self.world.app(
-            callee,
+        callee = self.world.app(callee, self.world.tuple([
             self.world.tuple([self.world.lit_i64(axis) for axis in reduced_axes]),
-        )
+            self.world.lit_bool(keepdim),
+            self._float_lit(self._tensor_element_type(input), p),
+        ]))
         result = self.world.app(callee, input)
         return self._remember_shape(result, output_dims)
 
@@ -1867,65 +1865,113 @@ class OperatorLibrary:
         self._remember_shape(result.proj(3, 2), stat_dims)
         return result
 
-    def smooth_l1_mean(self, input, target, beta=1.0):
-        """Map mean-reduced SmoothL1; piecewise and reduction semantics live in MimIR."""
-        dims = self.shape_of(input)
-        callee = self.world.annex(torch_dialect.loss.smooth_l1_mean.value)
+    def smooth_l1_loss(self, input, target, reduction="mean", beta=1.0):
+        """Map PyTorch SmoothL1 directly; broadcasting and reduction live in MimIR."""
+        input_dims = self.shape_of(input)
+        target_dims = self.shape_of(target)
+        output_dims = self.rules.broadcast_shape(input_dims, target_dims)
+        input_physical, input_map = self._broadcast_metadata(
+            input_dims, output_dims
+        )
+        target_physical, target_map = self._broadcast_metadata(
+            target_dims, output_dims
+        )
+        output_physical = self._physical_dims(output_dims)
+        reduction_tags = {"none": 0, "mean": 1, "sum": 2}
+        if reduction not in reduction_tags:
+            raise ValueError(f"invalid smooth_l1_loss reduction {reduction!r}")
+        callee = self.world.annex(torch_dialect.loss.smooth_l1_loss.value)
         callee = self.world.app(
             callee, self._torch_semantics(input, floating=True)
         )
         callee = self._apply_grouped(
-            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+            callee,
+            [self._lit_nat(len(input_physical)),
+             self._lit_nat(len(target_physical)),
+             self._lit_nat(len(output_physical))],
         )
+        callee = self.world.app(callee, self.world.tuple([
+            self.world.tuple(input_physical), input_map,
+            self.world.tuple(target_physical), target_map,
+            self.world.tuple(output_physical),
+        ]))
         callee = self.world.app(callee, self.world.tuple([input, target]))
-        result = self.world.app(callee, self._f32_float_lit(beta))
-        return self._remember_shape(result, [])
+        result = self.world.app(callee, self.world.tuple([
+            self._lit_nat(reduction_tags[reduction]),
+            self._float_lit(self._tensor_element_type(input), beta),
+        ]))
+        return self._remember_shape(
+            result, output_dims if reduction == "none" else []
+        )
 
-    def cross_entropy_mean_2d(self, input, target):
-        """Map default rank-2 cross entropy; its formula lives in MimIR."""
+    def cross_entropy_loss(
+        self, input, target, weight=None, reduction="mean",
+        ignore_index=-100, label_smoothing=0.0,
+    ):
+        """Map index or probability CrossEntropyLoss to its typed Torch schema."""
         input_dims = self.shape_of(input)
         target_dims = self.shape_of(target)
-        if len(input_dims) != 2 or len(target_dims) != 1:
+        rank = len(input_dims)
+        if rank < 1:
+            raise ValueError("cross_entropy input must have rank >= 1")
+        class_dim = 0 if rank == 1 else 1
+        loss_dims = input_dims[:class_dim] + input_dims[class_dim + 1:]
+        probability_target = self._tensor_element_type(target) != self.I64
+        expected_target_dims = input_dims if probability_target else loss_dims
+        if not self.rules.same_shape(expected_target_dims, target_dims):
+            raise ValueError("cross_entropy target shape does not match its dtype domain")
+        reduction_tags = {"none": 0, "mean": 1, "sum": 2}
+        if reduction not in reduction_tags:
+            raise ValueError(f"invalid cross_entropy reduction {reduction!r}")
+        physical_dims = self._physical_dims(input_dims)
+        if len(physical_dims) != rank:
             raise NotImplementedError(
-                "cross_entropy currently requires (N, C) logits and (N) target"
+                "cross_entropy with folded singleton axes is not implemented"
             )
-        if not self.rules.same_shape([input_dims[0]], target_dims):
-            raise ValueError("cross_entropy target batch must match input batch")
-        if self._tensor_element_type(target) != self.I64:
-            raise TypeError("cross_entropy class target must have dtype int64")
-        if len(self._physical_dims(input_dims)) != 2 or len(
-            self._physical_dims(target_dims)
-        ) != 1:
-            raise NotImplementedError(
-                "cross_entropy with folded singleton batch/class axes is not implemented"
-            )
-
-        callee = self.world.annex(
-            torch_dialect.loss.cross_entropy_mean_2d.value
+        classes = input_dims[class_dim]
+        channel_type = self.world.arr(classes, self._tensor_element_type(input))
+        optional_weight = (
+            self.world.app(self.world.annex(option.none.value), channel_type)
+            if weight is None else
+            self.world.implicit_app(self.world.annex(option.some.value), weight)
         )
+        member = (
+            torch_dialect.loss.cross_entropy_probability_loss
+            if probability_target else torch_dialect.loss.cross_entropy_loss
+        )
+        callee = self.world.annex(member.value)
         callee = self.world.app(
             callee, self._torch_semantics(input, floating=True)
         )
-        callee = self._apply_grouped(callee, input_dims)
-        result = self.world.app(callee, self.world.tuple([input, target]))
-        return self._remember_shape(result, [])
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
+        )
+        result = self.world.app(
+            callee, self.world.tuple([input, target, optional_weight])
+        )
+        result = self.world.app(result, self.world.tuple([
+            self._lit_nat(reduction_tags[reduction]),
+            self.world.lit_i64(ignore_index),
+            self._float_lit(self._tensor_element_type(input), label_smoothing),
+        ]))
+        return self._remember_shape(result, loss_dims if reduction == "none" else [])
 
-    def kl_div_reduced(self, input, target, reduction, log_target=False):
-        """Map reduced KLDiv; pointwise and reduction branches live in MimIR."""
+    def kl_div(self, input, target, reduction, log_target=False):
+        """Map all KLDiv reduction modes; pointwise semantics live in MimIR."""
         dims = self.shape_of(input)
         target_dims = self.shape_of(target)
         if not self.rules.same_shape(dims, target_dims):
             raise ValueError("kl_div input and target must have the same shape")
         if not dims:
             raise NotImplementedError("reduced scalar kl_div is not implemented")
-        reduction_tags = {"sum": 0, "mean": 1, "batchmean": 2}
+        reduction_tags = {"none": 0, "mean": 1, "sum": 2, "batchmean": 3}
         if reduction not in reduction_tags:
             raise NotImplementedError(
-                "kl_div currently supports sum, mean, and batchmean reduction"
+                "kl_div supports none, sum, mean, and batchmean reduction"
             )
 
         physical_dims = self._physical_dims(dims)
-        callee = self.world.annex(torch_dialect.loss.kl_div_reduced.value)
+        callee = self.world.annex(torch_dialect.loss.kl_div.value)
         callee = self.world.app(
             callee, self._torch_semantics(input, floating=True)
         )
@@ -1933,19 +1979,14 @@ class OperatorLibrary:
             callee,
             [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
         )
-        callee = self.world.app(
-            callee,
-            self.world.tuple(
-                [
-                    self.world.lit_bool(log_target),
-                    self._lit_nat(reduction_tags[reduction]),
-                ]
-            ),
-        )
-        result = self.world.app(callee, self.world.tuple([input, target]))
-        return self._remember_shape(result, [])
+        callee = self.world.app(callee, self.world.tuple([input, target]))
+        result = self.world.app(callee, self.world.tuple([
+            self._lit_nat(reduction_tags[reduction]),
+            self.world.lit_bool(log_target),
+        ]))
+        return self._remember_shape(result, dims if reduction == "none" else [])
 
-    def triplet_margin_reduced(
+    def triplet_margin_loss(
         self,
         anchor,
         positive,
@@ -1956,11 +1997,11 @@ class OperatorLibrary:
         swap=False,
         reduction="mean",
     ):
-        """Map rank-2 TripletMarginLoss; all formulas and branches stay in MimIR."""
+        """Map rank-1/rank-2 TripletMarginLoss directly to MimIR semantics."""
         dims = self.shape_of(anchor)
-        if len(dims) != 2 or len(self._physical_dims(dims)) != 2:
+        if len(dims) not in (1, 2) or len(self._physical_dims(dims)) != len(dims):
             raise NotImplementedError(
-                "triplet_margin_loss currently requires physical rank 2"
+                "triplet_margin_loss requires physical rank 1 or 2"
             )
         for name, value in (("positive", positive), ("negative", negative)):
             if not self.rules.same_shape(dims, self.shape_of(value)):
@@ -1973,18 +2014,41 @@ class OperatorLibrary:
             )
         if not isinstance(swap, bool):
             raise NotImplementedError("dynamic triplet swap is not implemented")
-        reduction_tags = {"sum": 0, "mean": 1}
+        reduction_tags = {"none": 0, "mean": 1, "sum": 2}
         if reduction not in reduction_tags:
             raise NotImplementedError(
-                "triplet_margin_loss currently supports sum and mean reduction"
+                "triplet_margin_loss supports none, sum, and mean reduction"
             )
 
         physical_dims = self._physical_dims(dims)
-        callee = self.world.annex(torch_dialect.loss.triplet_margin_reduced.value)
+        if len(dims) == 1 and reduction == "none":
+            callee = self.world.annex(
+                torch_dialect.loss.triplet_margin_loss_1d_none.value
+            )
+            callee = self.world.app(
+                callee, self._torch_semantics(anchor, floating=True)
+            )
+            callee = self._apply_grouped(callee, [physical_dims[0]])
+            callee = self.world.app(
+                callee, self.world.tuple([anchor, positive, negative])
+            )
+            result = self.world.app(callee, self.world.tuple([
+                self._float_lit(self._tensor_element_type(anchor), margin),
+                self._float_lit(self._tensor_element_type(anchor), p),
+                self._float_lit(self._tensor_element_type(anchor), eps),
+                self.world.lit_bool(swap),
+            ]))
+            return self._remember_shape(result, [])
+        callee = self.world.annex(torch_dialect.loss.triplet_margin_loss.value)
         callee = self.world.app(
             callee, self._torch_semantics(anchor, floating=True)
         )
-        callee = self._apply_grouped(callee, physical_dims)
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)]
+        )
+        callee = self.world.app(
+            callee, self.world.tuple([anchor, positive, negative])
+        )
         callee = self.world.app(
             callee,
             self.world.tuple(
@@ -1997,10 +2061,9 @@ class OperatorLibrary:
                 ]
             ),
         )
-        result = self.world.app(
-            callee, self.world.tuple([anchor, positive, negative])
-        )
-        return self._remember_shape(result, [])
+        result = callee
+        loss_dims = dims[:-1]
+        return self._remember_shape(result, loss_dims if reduction == "none" else [])
 
 
     def _torch_reduce(self, kind, input, dim, keepdim):
@@ -2015,26 +2078,6 @@ class OperatorLibrary:
         reduce_all = dim is None or (
             isinstance(dim, (tuple, list)) and len(dim) == 0
         )
-        if reduce_all and kind == "sum" and not keepdim:
-            callee = self.world.annex(torch_dialect.reduction.sum_all.value)
-            callee = self.world.app(callee, self._torch_semantics(input))
-            callee = self._apply_grouped(
-                callee,
-                [self._lit_nat(rank), self.world.tuple(physical_dims)],
-            )
-            result = self.world.app(callee, input)
-            return self._remember_shape(result, [])
-        if reduce_all and kind == "mean" and not keepdim:
-            callee = self.world.annex(torch_dialect.reduction.mean_all.value)
-            callee = self.world.app(
-                callee, self._torch_semantics(input, floating=True)
-            )
-            callee = self._apply_grouped(
-                callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
-            )
-            result = self.world.app(callee, input)
-            return self._remember_shape(result, [])
-
         if reduce_all:
             dim_list = list(range(logical_rank))
         else:
@@ -2060,63 +2103,40 @@ class OperatorLibrary:
         # extrema. Its logical removal/retention remains visible in the cache.
         if not physical_reduction_dims:
             return self._remember_shape(input, output_dims)
+        # A full physical reduction has a scalar ABI in MimIR. In particular,
+        # constructing the generic dependent `(drop_dims, keep_dims)#keepdim`
+        # result for rank one would expose an unrepresentable rank-zero tensor.
+        if (
+            len(physical_reduction_dims) == rank
+            and kind in ("sum", "mean", "amax")
+        ):
+            member = getattr(torch_dialect.reduction, f"{kind}_all")
+            callee = self.world.annex(member.value)
+            callee = self.world.app(
+                callee,
+                self._torch_semantics(input, floating=kind in ("mean", "amax")),
+            )
+            callee = self._apply_grouped(
+                callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
+            )
+            result = self.world.app(callee, input)
+            return self._remember_shape(result, output_dims)
         dim_values = [
             self.world.lit_i64(axis) for axis in physical_reduction_dims
         ]
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
-        if len(dim_values) == 1 and not keepdim and kind != "logsumexp":
-            callee = self.world.annex(
-                self._torch_annex_id(f"reduction.{kind}_dim")
-            )
-            dictionary = self._torch_semantics(
-                input, floating=kind in ("amax", "mean", "logsumexp")
-            )
-            callee = self.world.app(callee, dictionary)
-            callee = self._apply_grouped(callee, [self._lit_nat(rank), shape])
-            callee = self.world.app(callee, dim_values[0])
-            result = self.world.app(callee, input)
-            return self._remember_shape(result, output_dims)
-        if kind == "sum" and len(dim_values) == 1 and keepdim:
-            callee = self.world.annex(torch_dialect.reduction.sum_dim_keepdim.value)
-            callee = self.world.app(callee, self._torch_semantics(input))
-            callee = self._apply_grouped(callee, [self._lit_nat(rank), shape])
-            callee = self.world.app(callee, dim_values[0])
-            result = self.world.app(callee, input)
-            return self._remember_shape(result, output_dims)
-        if kind == "mean" and len(dim_values) == 1 and keepdim:
-            callee = self.world.annex(torch_dialect.reduction.mean_dim_keepdim.value)
-            callee = self.world.app(
-                callee, self._torch_semantics(input, floating=True)
-            )
-            callee = self._apply_grouped(
-                callee, [self._lit_nat(rank), shape]
-            )
-            callee = self.world.app(callee, dim_values[0])
-            result = self.world.app(callee, input)
-            return self._remember_shape(result, output_dims)
-        name = (
-            f"reduction.{kind}_dims_keepdim"
-            if keepdim
-            else f"reduction.{kind}_dims"
-        )
-        if keepdim and kind == "amax":
-            name = "reduction.amax_dims"
-        callee = self.world.annex(self._torch_annex_id(name))
+        callee = self.world.annex(self._torch_annex_id(f"reduction.{kind}"))
         dictionary = self._torch_semantics(
             input, floating=kind in ("amax", "mean", "logsumexp")
         )
         callee = self.world.app(callee, dictionary)
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
-        callee = self.world.app(callee, dim_tuple)
+        callee = self.world.app(
+            callee, self.world.tuple([dim_tuple, self.world.lit_bool(keepdim)])
+        )
         result = self.world.app(callee, input)
-        if keepdim and kind == "amax":
-            reduced_dims = self.rules.reduce_shape_spec(
-                dims, dim=canonical, keepdim=False
-            ).output_dims
-            self._remember_shape(result, reduced_dims)
-            return self.reshape(result, output_dims)
         return self._remember_shape(result, output_dims)
 
     def _f32_pair_reduce_lambda(self, pair_type):
@@ -2254,7 +2274,7 @@ class OperatorLibrary:
         dim_values = [
             self.world.lit_i64(axis) for axis in physical_reduction_dims
         ]
-        callee = self.world.annex(torch_dialect.reduction.var_mean_dims.value)
+        callee = self.world.annex(torch_dialect.reduction.var_mean.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -2271,23 +2291,19 @@ class OperatorLibrary:
                 self._float_lit(
                     self._tensor_element_type(input), correction
                 ),
+                self.world.lit_bool(keepdim),
             ]),
         )
         result = self.world.app(callee, input)
-        reduced_dims = self.rules.reduce_shape_spec(
-            dims, dim=canonical, keepdim=False
+        output_dims = self.rules.reduce_shape_spec(
+            dims, dim=canonical, keepdim=keepdim
         ).output_dims
         outputs = []
         for index in range(2):
             # The Torch axiom carries an internal Bool tag to keep two
             # equal-shaped tensors from folding into one rank-higher tensor.
             output = result.proj(3, index + 1)
-            self._remember_shape(output, reduced_dims)
-            if keepdim:
-                keep_dims = self.rules.reduce_shape_spec(
-                    dims, dim=canonical, keepdim=True
-                ).output_dims
-                output = self.reshape(output, keep_dims)
+            self._remember_shape(output, output_dims)
             outputs.append(output)
         # Keep multiple results as frontend structure. Constructing a MimIR
         # tuple here would normalize equal-shaped tensors into one tensor with
@@ -2681,6 +2697,43 @@ class OperatorLibrary:
                 running_var, self._f32_float_lit(eps),
             ]),
         )
+        return self._remember_shape(result, dims)
+
+    def batch_norm(
+        self, input, running_mean, running_var, weight=None, bias=None,
+        training=False, momentum=0.1, eps=1e-5, cudnn_enabled=True,
+    ):
+        """Map the output semantics of ``aten.batch_norm`` directly to MimIR."""
+        dims = self.shape_of(input)
+        if len(dims) < 2:
+            raise NotImplementedError("batch_norm expects input rank >= 2")
+        channels = dims[1]
+        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        callee = self.world.annex(torch_dialect.normalization.batch_norm.value)
+        callee = self.world.app(callee, self._torch_semantics(input, floating=True))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        callee = self.world.app(callee, self.world.tuple([
+            input, optional(weight), optional(bias),
+            optional(running_mean), optional(running_var),
+        ]))
+        result = self.world.app(callee, self.world.tuple([
+            self.world.lit_bool(training),
+            self._float_lit(self._tensor_element_type(input), momentum),
+            self._float_lit(self._tensor_element_type(input), eps),
+            self.world.lit_bool(cudnn_enabled),
+        ]))
         return self._remember_shape(result, dims)
 
     def _tensor_reshape(self, x, shape):
@@ -3496,48 +3549,42 @@ class OperatorLibrary:
 
     def adaptive_avg_pool1d(self, x, output_size):
         in_dims = self.shape_of(x)
-        if len(in_dims) != 3:
+        if len(in_dims) not in (2, 3):
             raise NotImplementedError(
-                "adaptive_avg_pool1d requires a rank-3 NCL input"
+                "adaptive_avg_pool1d requires rank-2 CL or rank-3 NCL input"
             )
         output_size = self._single(output_size, "output_size")
-        if output_size != 1:
-            raise NotImplementedError(
-                "adaptive_avg_pool1d currently supports output_size=1"
-            )
-        n, c, length = in_dims
+        output_size = self._to_nat(output_size)
         callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
-        callee = self._apply_grouped(callee, [n, c, length])
-        result = self.world.app(callee, self._lit_nat(output_size))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(in_dims)), self.world.tuple(in_dims)]
+        )
+        result = self.world.app(callee, output_size)
         result = self.world.app(result, x)
-        return self._remember_shape(result, [n, c, self._lit_nat(1)])
+        return self._remember_shape(result, [*in_dims[:-1], output_size])
 
     def adaptive_avg_pool3d(self, x, output_size):
         in_dims = self.shape_of(x)
-        if len(in_dims) != 5:
+        if len(in_dims) not in (4, 5):
             raise NotImplementedError(
-                "adaptive_avg_pool3d requires a rank-5 NCDHW input"
+                "adaptive_avg_pool3d requires rank-4 CDHW or rank-5 NCDHW input"
             )
         if isinstance(output_size, int):
             output_size = (output_size,) * 3
         else:
             output_size = tuple(output_size)
-        if output_size != (1, 1, 1):
-            raise NotImplementedError(
-                "adaptive_avg_pool3d currently supports output_size=(1,1,1)"
-            )
-        n, c, depth, height, width = in_dims
+        if len(output_size) != 3:
+            raise ValueError("adaptive_avg_pool3d output_size must have length 3")
+        output_defs = [self._to_nat(value) for value in output_size]
         callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
-        callee = self._apply_grouped(callee, [n, c, depth, height, width])
-        result = self.world.app(
-            callee, self.world.tuple([self._lit_nat(1)] * 3)
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(in_dims)), self.world.tuple(in_dims)]
         )
+        result = self.world.app(callee, self.world.tuple(output_defs))
         result = self.world.app(result, x)
-        return self._remember_shape(
-            result, [n, c, self._lit_nat(1), self._lit_nat(1), self._lit_nat(1)]
-        )
+        return self._remember_shape(result, [*in_dims[:-3], *output_defs])
 
     def repeat(self, x, repeats):
         in_dims = self.shape_of(x)
