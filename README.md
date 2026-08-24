@@ -76,6 +76,22 @@ Use `uv run --no-sync pytest -q` after bootstrap:
 uv run --no-sync pytest -q
 ```
 
+## Benchmarking Backends
+
+Compare eager PyTorch, Inductor, and MimIR with each backend isolated in a
+resource-bounded subprocess:
+
+```bash
+uv run --no-sync python scripts/benchmark_backends.py models/py/mlp.py \
+  --repeat 5 --threads 1 --max-memory-gb 16 --timeout 300
+```
+
+The runner checks every result against eager execution and reports first-call
+time, steady-state mean/minimum time, eager-relative speed, and maximum absolute
+error. Use `--no-cache` to include a fresh MimIR compile and `--results-json`
+to retain machine-readable results. Memory and timeout limits apply per model
+and backend, so a failed large compile does not terminate the parent run.
+
 ## Fresh Clone Smoke Test
 
 The expected mentor workflow is:
