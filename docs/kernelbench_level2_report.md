@@ -2,14 +2,16 @@
 
 ## Validated Baseline
 
-The full 100-case Lighthouse/KernelBench Level 2 corpus was run with:
+The full 100-case Lighthouse/KernelBench Level 2 corpus was revalidated on
+2026-08-24 at frontend commit `9a2ac97` and MimIR commit `b14def34d0` with:
 
 ```text
---suite level2 --size-divisor 16 --timeout 240 --max-fp-iters 128
+--suite level2 --size-divisor 16 --timeout 240 --max-memory-gb 16 \
+  --max-fp-iters 512
 ```
 
-Each of four shards used an isolated writable `MIMIR_CACHE_DIR`. The validated
-result is:
+Each case runs in an isolated subprocess and the run used an isolated writable
+`MIMIR_CACHE_DIR`. The validated result is:
 
 | Status | Cases | Rate |
 | --- | ---: | ---: |
@@ -19,8 +21,12 @@ result is:
 | TIMEOUT | 0 | 0.0% |
 
 Excluding fixtures that fail in PyTorch eager before MimIR is invoked, the
-compiler pass rate is **96/97 (99.0%)**. This improves the preceding baseline
-from 70/100 by 26 passing cases.
+compiler pass rate is **96/97 (99.0%)**.
+
+At 128 fixed-point iterations, only 78 cases pass and 18 otherwise-correct
+convolution compositions stop in `%mem.seo`. All 18 pass when rerun at 512.
+The higher budget is therefore part of the reproducible baseline, not a
+case-specific semantic workaround.
 
 ## Implemented In This Increment
 
@@ -46,13 +52,10 @@ and the complete Level 2 corpus validate these changes.
 
 ## Remaining Failures
 
-- 1 case: the fixture triggers a Dynamo graph break in `_warnings.warn` before
-  the MimIR backend is called. Allowing that warning as reorderable exposes a
-  second, independent limitation: instance normalization of `[N, 1, 1, W]`
-  reaches the known singleton-dimension buffer mismatch in
-  `%tensor.lower_to_mem` (`Buf<2, [N,W]>` versus `N x Buf<1, [W]>`). This must
-  be fixed at the tensor/type boundary rather than hidden by a Torch-specific
-  decomposition.
+- `level2/28_BMM_InstanceNorm_Sum_ResidualAdd_Multiply.py` leaves the Torch
+  dialect, but `%tensor.map_reduce` reaches the LLVM backend without being
+  bufferized. This is a tensor-to-memory lowering defect and must not be hidden
+  by a Torch-specific frontend workaround.
 
 The three INVALID fixtures have incompatible shapes after fixture scaling and
 also fail under eager execution.

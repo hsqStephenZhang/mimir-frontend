@@ -2,6 +2,9 @@
 
 ## Level 3
 
+Revalidated on 2026-08-24 at frontend commit `9a2ac97` and MimIR commit
+`b14def34d0`.
+
 The 50-case corpus is run with an isolated cache and subprocess for every case:
 
 ```text

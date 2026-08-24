@@ -1,9 +1,11 @@
 # KernelBench Level 1 Coverage
 
-Validated with four isolated shards:
+Validated on 2026-08-24 at frontend commit `9a2ac97` and MimIR commit
+`b14def34d0`. The serial runner isolates every case in its own subprocess:
 
 ```text
---suite level1 --size-divisor 16 --timeout 240 --max-fp-iters 512
+--suite level1 --size-divisor 16 --timeout 240 --max-memory-gb 16 \
+  --max-fp-iters 512
 ```
 
 | Status | Cases | Rate |
