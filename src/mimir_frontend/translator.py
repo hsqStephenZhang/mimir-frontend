@@ -254,7 +254,7 @@ class FXGraphTranslator:
         # Reductions
         m[torch.sum] = self._wrap_reduction(self.ops.sum)
         m["sum"] = self._wrap_reduction(self.ops.sum)
-        m["aten.sum.default"] = self._wrap_reduction(self.ops.sum)
+        m["aten.sum.default"] = self._wrap_reduction(self.ops.sum, default=True)
         m["aten.sum.dim_IntList"] = self._wrap_reduction(self.ops.sum)
         m[torch.amax] = self._wrap_reduction(self.ops.amax)
         m["aten.amax.default"] = self._wrap_reduction(self.ops.amax)
@@ -272,7 +272,7 @@ class FXGraphTranslator:
         m["aten.argmin.default"] = self._wrap_arg_extrema("min")
         m[torch.mean] = self._wrap_reduction(self.ops.mean)
         m["mean"] = self._wrap_reduction(self.ops.mean)
-        m["aten.mean.default"] = self._wrap_reduction(self.ops.mean)
+        m["aten.mean.default"] = self._wrap_reduction(self.ops.mean, default=True)
         m["aten.mean.dim"] = self._wrap_reduction(self.ops.mean)
         m[torch.logsumexp] = self._wrap_reduction(self.ops.logsumexp)
         m["aten.logsumexp.default"] = self._wrap_reduction(self.ops.logsumexp)
@@ -320,6 +320,11 @@ class FXGraphTranslator:
         m[torch.nn.functional.triplet_margin_loss] = self._wrap_triplet_margin_loss()
         m["batch_norm"] = self._wrap_functional_batch_norm()
         m["aten.batch_norm.default"] = self._wrap_aten_batch_norm()
+        m[torch.ops.aten.native_batch_norm.default] = self._wrap_native_batch_norm()
+        m["aten.native_batch_norm.default"] = self._wrap_native_batch_norm()
+        functional_batch_norm = self._wrap_native_batch_norm_functional()
+        m[torch.ops.aten._native_batch_norm_legit_functional.default] = functional_batch_norm
+        m["aten._native_batch_norm_legit_functional.default"] = functional_batch_norm
 
         # Linear Algebra
         m[torch.mm] = self._wrap_binary(self.ops.mm)
@@ -830,11 +835,8 @@ class FXGraphTranslator:
     def _wrap_adaptive_avg_pool2d(self):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
-            x = args[0]
             output_size = args[1] if len(args) > 1 else node.kwargs.get("output_size")
-            if output_size == 1 or output_size == [1, 1] or output_size == (1, 1):
-                return self.ops.mean(x, dim=[2, 3], keepdim=True)
-            raise NotImplementedError("adaptive_avg_pool2d currently supports output_size=1 only")
+            return self.ops.adaptive_avg_pool2d(args[0], output_size)
         return convert
 
     def _wrap_adaptive_avg_pool1d(self):
@@ -1005,12 +1007,20 @@ class FXGraphTranslator:
             return self.ops.leaky_relu(args[0], negative_slope=negative_slope)
         return convert
 
-    def _wrap_reduction(self, op_func):
+    def _wrap_reduction(self, op_func, *, default=False):
         def convert(node: fx.Node):
             args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
             input_def = args[0]
-            dim = args[1] if len(args) > 1 else node.kwargs.get("dim", None)
-            keepdim = args[2] if len(args) > 2 else node.kwargs.get("keepdim", False)
+            if default:
+                dim, keepdim = None, False
+                dtype = args[1] if len(args) > 1 else kwargs.get("dtype")
+            else:
+                dim = args[1] if len(args) > 1 else kwargs.get("dim", None)
+                keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+                dtype = args[3] if len(args) > 3 else kwargs.get("dtype")
+            if op_func in (self.ops.sum, self.ops.mean):
+                return op_func(input_def, dim=dim, keepdim=keepdim, dtype=dtype)
             return op_func(input_def, dim=dim, keepdim=keepdim)
         return convert
 
@@ -1341,6 +1351,28 @@ class FXGraphTranslator:
                 input_def, running_mean, running_var, weight, bias,
                 training, momentum, eps, cudnn_enabled,
             )
+        return convert
+
+    def _wrap_native_batch_norm(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            kwargs = self._retrieve_args(node.kwargs)
+
+            def argument(index, name, default=None):
+                return args[index] if len(args) > index else kwargs.get(name, default)
+
+            return self.ops.native_batch_norm(
+                argument(0, "input"), argument(3, "running_mean"),
+                argument(4, "running_var"), argument(1, "weight"),
+                argument(2, "bias"), argument(5, "training", False),
+                argument(6, "momentum", 0.1), argument(7, "eps", 1e-5),
+            )
+        return convert
+
+    def _wrap_native_batch_norm_functional(self):
+        def convert(node: fx.Node):
+            args = self.retrieve_args(node)
+            return self.ops.native_batch_norm_functional(*args)
         return convert
 
     def _wrap_where(self):

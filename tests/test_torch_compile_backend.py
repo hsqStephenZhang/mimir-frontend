@@ -384,6 +384,91 @@ def test_var_mean_dim_overload_matches_eager(unbiased):
     check_against_eager(VarMeanDim(), torch.randn(2, 3), equal_nan=True)
 
 
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_var_mean_full_reduction_matches_eager(keepdim):
+    class VarMeanAll(torch.nn.Module):
+        def forward(self, x):
+            variance, mean = torch.var_mean(
+                x, correction=0, keepdim=keepdim
+            )
+            # Consume both scalar results in a tensor expression. The backend's
+            # flat multi-output ABI does not yet materialize scalar tuples.
+            return x + variance + mean
+
+    check_against_eager(VarMeanAll(), torch.randn(7), equal_nan=True)
+
+
+def test_var_mean_large_offset_matches_eager():
+    class VarMeanStable(torch.nn.Module):
+        def forward(self, x):
+            return torch.var_mean(x, dim=-1, correction=0)
+
+    # The old E[x^2] - E[x]^2 implementation suffers catastrophic
+    # cancellation for a large offset with a small representable variance.
+    x = torch.tensor(
+        [[10000.0, 10000.125, 9999.875, 10000.25],
+         [20000.0, 20000.25, 19999.75, 20000.5]],
+        dtype=torch.float32,
+    )
+    check_against_eager(VarMeanStable(), x, equal_nan=True)
+
+
+def test_var_mean_nan_and_inf_matches_eager():
+    class VarMeanSpecialValues(torch.nn.Module):
+        def forward(self, x):
+            return torch.var_mean(x, dim=-1, correction=0)
+
+    x = torch.tensor(
+        [[float("nan"), 1.0, 2.0],
+         [float("inf"), float("inf"), 3.0]],
+        dtype=torch.float32,
+    )
+    check_against_eager(VarMeanSpecialValues(), x, equal_nan=True)
+
+
+@pytest.mark.parametrize("correction", [0, 1])
+def test_var_mean_folded_singleton_axis_matches_eager(correction):
+    class VarMeanSingleton(torch.nn.Module):
+        def forward(self, x):
+            variance, mean = torch.var_mean(
+                x, dim=1, correction=correction
+            )
+            return variance + mean
+
+    check_against_eager(
+        VarMeanSingleton(), torch.randn(2, 1, 3), equal_nan=True
+    )
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float32])
+def test_integer_sum_dtype_matches_eager(dtype):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.sum(x, dim=1, dtype=dtype)
+
+    check_against_eager(
+        Model(), torch.tensor([[1, 2, 3], [-4, 5, 6]], dtype=torch.int64)
+    )
+
+
+def test_integer_mean_float_dtype_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.mean(x, dim=1, dtype=torch.float32)
+
+    check_against_eager(
+        Model(), torch.tensor([[1, 2, 3], [-4, 5, 6]], dtype=torch.int64)
+    )
+
+
+def test_norm_matching_dtype_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.norm(x, p=1.5, dim=1, dtype=torch.float32)
+
+    check_against_eager(Model(), torch.randn(2, 5))
+
+
 @pytest.mark.parametrize("kind", ["max", "min"])
 def test_dim_extrema_values_indices_and_ties_match_eager(kind):
     class DimExtrema(torch.nn.Module):
@@ -1224,6 +1309,37 @@ def test_triplet_margin_rank1_none_matches_eager():
     check_against_eager(Model(), *(torch.randn(7) for _ in range(3)))
 
 
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_triplet_margin_rank3_matches_eager(reduction):
+    class Model(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor, positive, negative, margin=0.75, p=1.5,
+                eps=1e-6, swap=True, reduction=reduction,
+            )
+
+    check_against_eager(
+        Model(), *(torch.randn(2, 3, 5) for _ in range(3))
+    )
+
+
+@pytest.mark.parametrize("p", [0.0, -1.0])
+def test_triplet_margin_nonpositive_p_matches_eager(p):
+    class Model(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor, positive, negative, margin=0.5, p=p,
+                eps=1e-6, swap=False, reduction="mean",
+            )
+
+    check_against_eager(
+        Model(),
+        torch.randn(3, 5),
+        torch.randn(3, 5),
+        torch.randn(3, 5),
+    )
+
+
 def test_cross_entropy_rank4_weight_ignore_smoothing_matches_eager():
     class Model(torch.nn.Module):
         def forward(self, logits, target, weight):
@@ -1249,15 +1365,88 @@ def test_cross_entropy_probability_target_matches_eager():
     check_against_eager(Model(), logits, target, torch.rand(5))
 
 
-def test_adaptive_pool_nondivisible_unbatched_matches_eager():
+def test_cross_entropy_all_ignored_mean_matches_eager():
     class Model(torch.nn.Module):
-        def forward(self, x1, x3):
-            return (
-                torch.nn.functional.adaptive_avg_pool1d(x1, 3),
-                torch.nn.functional.adaptive_avg_pool3d(x3, (3, 2, 4)),
+        def forward(self, logits, target):
+            return torch.nn.functional.cross_entropy(
+                logits, target, reduction="mean", ignore_index=-100
             )
 
-    check_against_eager(Model(), torch.randn(2, 5), torch.randn(2, 5, 4, 7))
+    target = torch.full((3,), -100, dtype=torch.int64)
+    check_against_eager(Model(), torch.randn(3, 4), target, equal_nan=True)
+
+
+def test_cross_entropy_probability_negative_ignore_index_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target):
+            return torch.nn.functional.cross_entropy(
+                logits, target, ignore_index=-2
+            )
+
+    logits = torch.randn(2, 4)
+    target = torch.softmax(torch.randn_like(logits), dim=1)
+    check_against_eager(Model(), logits, target)
+
+
+def test_cross_entropy_empty_probability_classes_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, logits, target):
+            return torch.nn.functional.cross_entropy(
+                logits, target, reduction="mean"
+            )
+
+    logits = torch.empty(2, 0)
+    target = torch.empty(2, 0)
+    assert torch.isnan(Model()(logits, target))
+    with pytest.raises(
+        torch._dynamo.exc.BackendCompilerFailed,
+        match="explicit tensor type boundary",
+    ):
+        torch.compile(Model(), backend=mimir_backend)(logits, target)
+
+
+def test_cross_entropy_out_of_range_reaches_compiled_runtime(tmp_path):
+    code = """
+import torch
+from mimir_frontend.backend import mimir_backend
+
+class Model(torch.nn.Module):
+    def forward(self, logits, target):
+        return torch.nn.functional.cross_entropy(logits, target)
+
+logits = torch.randn(2, 3)
+target = torch.tensor([0, 3], dtype=torch.int64)
+with torch.no_grad():
+    torch.compile(Model(), backend=mimir_backend)(logits, target)
+"""
+    env = os.environ.copy()
+    env["MIMIR_CACHE_DIR"] = str(tmp_path / "mimir-jit-cache")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "cross_entropy target out of range" in output
+
+
+def test_adaptive_pool_nondivisible_unbatched_matches_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x1, x2, x3):
+            return (
+                torch.nn.functional.adaptive_avg_pool1d(x1, 3),
+                torch.nn.functional.adaptive_avg_pool2d(x2, (3, 4)),
+                torch.nn.functional.adaptive_avg_pool3d(x3, (None, 2, 4)),
+            )
+
+    check_against_eager(
+        Model(), torch.randn(2, 5), torch.randn(2, 5, 7),
+        torch.randn(2, 5, 4, 7)
+    )
 
 
 def test_batch_norm_training_without_running_stats_matches_eager():
@@ -1268,6 +1457,32 @@ def test_batch_norm_training_without_running_stats_matches_eager():
             )
 
     check_against_eager(Model(), torch.randn(2, 3, 4, 5))
+
+
+def test_native_batch_norm_training_three_results_match_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.native_batch_norm.default(
+                x, weight, bias, None, None, True, 0.1, 1e-5
+            )
+
+    check_against_eager(
+        Model(), torch.randn(2, 3, 4, 5), torch.randn(3), torch.randn(3)
+    )
+
+
+def test_functional_native_batch_norm_updates_match_eager():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias, running_mean, running_var):
+            return torch.ops.aten._native_batch_norm_legit_functional.default(
+                x, weight, bias, running_mean, running_var,
+                True, 0.25, 1e-5,
+            )
+
+    check_against_eager(
+        Model(), torch.randn(2, 3, 4, 5), torch.randn(3), torch.randn(3),
+        torch.randn(3), torch.rand(3) + 1,
+    )
 
 
 def test_pytorch_fallback_decomposition_matches_eager():

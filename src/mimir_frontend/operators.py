@@ -843,6 +843,8 @@ class OperatorLibrary:
             out_type = self.F32
         elif dtype == torch.bool:
             out_type = self.Bool
+        elif dtype in (torch.int64, torch.long):
+            out_type = self.I64
         else:
             raise NotImplementedError(f"Conversion to {dtype} is not implemented")
             
@@ -865,6 +867,21 @@ class OperatorLibrary:
             callee = self.world.implicit_app(callee, self.f32_config)
             lam.set_body(True, self.world.app(callee, value))
             return self.unary(lam, x, out_type=self.F32)
+
+        if in_type == self.Bool and out_type == self.I64:
+            lam = self.world.mut_lam(self.Bool, self.I64)
+            value = lam.var()
+            callee = self.world.app(
+                self.world.annex(core.select.value), self.I64
+            )
+            lam.set_body(
+                True,
+                self._apply_grouped(
+                    callee,
+                    [value, self.world.lit_i64(1), self.world.lit_i64(0)],
+                ),
+            )
+            return self.unary(lam, x, out_type=self.I64)
             
         if in_type == self.F32 and out_type == self.Bool:
             lam = self._f32_unary_lambda(
@@ -1351,12 +1368,34 @@ class OperatorLibrary:
             return result, spec.output_dims
         return result
 
-    def sum(self, input, dim=None, keepdim=False):
+    def sum(self, input, dim=None, keepdim=False, dtype=None):
         """
         Translates to the Torch reduction schema; its implementation lowers
         to tensor.map_reduce after dimension validation and PE.
         """
-        return self._torch_reduce("sum", input, dim, keepdim)
+        input_type = self._tensor_element_type(input)
+        if dtype is None:
+            result_type = self.I64 if input_type in (self.Bool, self.I64) else input_type
+        else:
+            result_type = {
+                torch.float32: self.F32,
+                torch.float64: self.F64,
+                torch.int64: self.I64,
+            }.get(dtype)
+            if result_type is None:
+                raise NotImplementedError(f"sum dtype {dtype} is not implemented")
+        supported = {
+            (self.F32, self.F32), (self.F64, self.F64),
+            (self.I64, self.I64), (self.Bool, self.I64),
+            (self.I64, self.F32),
+        }
+        if (input_type, result_type) not in supported:
+            raise NotImplementedError(
+                f"sum dtype conversion {input_type} -> {result_type} is not implemented"
+            )
+        return self._torch_reduce(
+            "sum", input, dim, keepdim, result_type=result_type
+        )
 
     def amax(self, input, dim=None, keepdim=False):
         """
@@ -1371,7 +1410,14 @@ class OperatorLibrary:
         if not isinstance(p, (int, float)):
             raise NotImplementedError(f"torch.norm p={p!r} is not implemented")
         if dtype is not None:
-            raise NotImplementedError("torch.norm dtype conversion is not implemented")
+            requested = {
+                torch.float32: self.F32,
+                torch.float64: self.F64,
+            }.get(dtype)
+            if requested is None or requested != self._tensor_element_type(input):
+                raise NotImplementedError(
+                    "torch.norm currently supports dtype= only when it matches the input"
+                )
         logical_dims = self.shape_of(input)
         logical_rank = len(logical_dims)
         dimensions = (
@@ -1915,6 +1961,13 @@ class OperatorLibrary:
         if rank < 1:
             raise ValueError("cross_entropy input must have rank >= 1")
         class_dim = 0 if rank == 1 else 1
+        if self._is_lit_nat_value(input_dims[class_dim], 0):
+            # Literal zero extents collapse the nested-array element type in
+            # current MimIR. The Torch semantics handles symbolic C=0, but the
+            # frontend cannot construct this physical tensor boundary yet.
+            raise NotImplementedError(
+                "cross_entropy with a literal zero class extent requires an explicit tensor type boundary"
+            )
         loss_dims = input_dims[:class_dim] + input_dims[class_dim + 1:]
         probability_target = self._tensor_element_type(target) != self.I64
         expected_target_dims = input_dims if probability_target else loss_dims
@@ -1935,19 +1988,25 @@ class OperatorLibrary:
             if weight is None else
             self.world.implicit_app(self.world.annex(option.some.value), weight)
         )
-        member = (
-            torch_dialect.loss.cross_entropy_probability_loss
-            if probability_target else torch_dialect.loss.cross_entropy_loss
+        floating = self._torch_semantics(input, floating=True)
+        target_constructor = (
+            torch_dialect.cross_entropy_probability_target
+            if probability_target else torch_dialect.cross_entropy_index_target
         )
-        callee = self.world.annex(member.value)
-        callee = self.world.app(
-            callee, self._torch_semantics(input, floating=True)
+        encoded_target = self.world.app(
+            self.world.annex(target_constructor.value), floating
         )
+        encoded_target = self._apply_grouped(
+            encoded_target, [self._lit_nat(rank), self.world.tuple(physical_dims)]
+        )
+        encoded_target = self.world.app(encoded_target, target)
+        callee = self.world.annex(torch_dialect.loss.cross_entropy.value)
+        callee = self.world.app(callee, floating)
         callee = self._apply_grouped(
             callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
         )
         result = self.world.app(
-            callee, self.world.tuple([input, target, optional_weight])
+            callee, self.world.tuple([input, encoded_target, optional_weight])
         )
         result = self.world.app(result, self.world.tuple([
             self._lit_nat(reduction_tags[reduction]),
@@ -1997,11 +2056,11 @@ class OperatorLibrary:
         swap=False,
         reduction="mean",
     ):
-        """Map rank-1/rank-2 TripletMarginLoss directly to MimIR semantics."""
+        """Map non-scalar TripletMarginLoss directly to MimIR semantics."""
         dims = self.shape_of(anchor)
-        if len(dims) not in (1, 2) or len(self._physical_dims(dims)) != len(dims):
+        if len(dims) < 1 or len(self._physical_dims(dims)) != len(dims):
             raise NotImplementedError(
-                "triplet_margin_loss requires physical rank 1 or 2"
+                "triplet_margin_loss requires a non-scalar physical tensor"
             )
         for name, value in (("positive", positive), ("negative", negative)):
             if not self.rules.same_shape(dims, self.shape_of(value)):
@@ -2053,9 +2112,9 @@ class OperatorLibrary:
             callee,
             self.world.tuple(
                 [
-                    self._f32_float_lit(float(margin)),
-                    self._f32_float_lit(float(p)),
-                    self._f32_float_lit(float(eps)),
+                    self._float_lit(self._tensor_element_type(anchor), margin),
+                    self._float_lit(self._tensor_element_type(anchor), p),
+                    self._float_lit(self._tensor_element_type(anchor), eps),
                     self.world.lit_bool(swap),
                     self._lit_nat(reduction_tags[reduction]),
                 ]
@@ -2066,7 +2125,7 @@ class OperatorLibrary:
         return self._remember_shape(result, loss_dims if reduction == "none" else [])
 
 
-    def _torch_reduce(self, kind, input, dim, keepdim):
+    def _torch_reduce(self, kind, input, dim, keepdim, *, result_type=None):
         dims = self.shape_of(input)
         logical_rank = len(dims)
         physical_axes = [
@@ -2102,6 +2161,9 @@ class OperatorLibrary:
         # Reducing an extent-one dimension is an identity for sum, mean, and
         # extrema. Its logical removal/retention remains visible in the cache.
         if not physical_reduction_dims:
+            if kind == "sum" and result_type != self._tensor_element_type(input):
+                dtype = {self.F32: torch.float32, self.I64: torch.int64}[result_type]
+                input = self.convert_element_type(input, dtype)
             return self._remember_shape(input, output_dims)
         # A full physical reduction has a scalar ABI in MimIR. In particular,
         # constructing the generic dependent `(drop_dims, keep_dims)#keepdim`
@@ -2110,12 +2172,25 @@ class OperatorLibrary:
             len(physical_reduction_dims) == rank
             and kind in ("sum", "mean", "amax")
         ):
-            member = getattr(torch_dialect.reduction, f"{kind}_all")
-            callee = self.world.annex(member.value)
-            callee = self.world.app(
-                callee,
-                self._torch_semantics(input, floating=kind in ("mean", "amax")),
+            member = (
+                torch_dialect.reduction.sum_typed_all
+                if kind == "sum"
+                else getattr(torch_dialect.reduction, f"{kind}_all")
             )
+            callee = self.world.annex(member.value)
+            if kind == "sum":
+                dictionary = self.world.app(
+                    self.world.app(
+                        self.world.annex(torch_dialect.resolve_reduction.value),
+                        self._tensor_element_type(input),
+                    ),
+                    result_type,
+                )
+            else:
+                dictionary = self._torch_semantics(
+                    input, floating=kind in ("mean", "amax")
+                )
+            callee = self.world.app(callee, dictionary)
             callee = self._apply_grouped(
                 callee, [self._lit_nat(rank), self.world.tuple(physical_dims)]
             )
@@ -2127,10 +2202,20 @@ class OperatorLibrary:
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
-        callee = self.world.annex(self._torch_annex_id(f"reduction.{kind}"))
-        dictionary = self._torch_semantics(
-            input, floating=kind in ("amax", "mean", "logsumexp")
-        )
+        member = "sum_typed" if kind == "sum" else kind
+        callee = self.world.annex(self._torch_annex_id(f"reduction.{member}"))
+        if kind == "sum":
+            dictionary = self.world.app(
+                self.world.app(
+                    self.world.annex(torch_dialect.resolve_reduction.value),
+                    self._tensor_element_type(input),
+                ),
+                result_type,
+            )
+        else:
+            dictionary = self._torch_semantics(
+                input, floating=kind in ("amax", "mean", "logsumexp")
+            )
         callee = self.world.app(callee, dictionary)
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
         callee = self.world.app(
@@ -2150,10 +2235,14 @@ class OperatorLibrary:
         lam.app(True, lam.var().proj(2, 1), [self.world.tuple([sum_next, count_next])])
         return lam
 
-    def mean(self, input, dim=None, keepdim=False):
+    def mean(self, input, dim=None, keepdim=False, dtype=None):
         """
         Translates to mean reduction.
         """
+        if dtype not in (None, torch.float32, torch.float):
+            raise NotImplementedError(f"mean dtype {dtype} is not implemented")
+        if dtype in (torch.float32, torch.float) and self._tensor_element_type(input) != self.F32:
+            input = self.convert_element_type(input, torch.float32)
         return self._torch_reduce("mean", input, dim, keepdim)
 
     def logsumexp(self, input, dim, keepdim=False):
@@ -2263,12 +2352,56 @@ class OperatorLibrary:
             if axis in physical_axes
         ]
         if len(physical_reduction_dims) == len(physical_dims):
-            raise NotImplementedError(
-                "var_mean reduction to a rank-0 tensor is not implemented"
+            callee = self.world.annex(
+                torch_dialect.reduction.var_mean_all.value
+            )
+            callee = self.world.app(
+                callee, self._torch_semantics(input, floating=True)
+            )
+            callee = self._apply_grouped(
+                callee,
+                [
+                    self._lit_nat(len(physical_dims)),
+                    self.world.tuple(physical_dims),
+                ],
+            )
+            callee = self.world.app(
+                callee,
+                self._float_lit(self._tensor_element_type(input), correction),
+            )
+            result = self.world.app(callee, input)
+            output_dims = self.rules.reduce_shape_spec(
+                dims, dim=canonical, keepdim=keepdim
+            ).output_dims
+            return tuple(
+                self._remember_shape(result.proj(3, index), output_dims)
+                for index in (1, 2)
             )
         if not physical_reduction_dims:
-            raise NotImplementedError(
-                "var_mean over only folded singleton axes is not implemented"
+            callee = self.world.annex(
+                torch_dialect.reduction.var_mean_singletons.value
+            )
+            callee = self.world.app(
+                callee, self._torch_semantics(input, floating=True)
+            )
+            callee = self._apply_grouped(
+                callee,
+                [
+                    self._lit_nat(len(physical_dims)),
+                    self.world.tuple(physical_dims),
+                ],
+            )
+            callee = self.world.app(
+                callee,
+                self._float_lit(self._tensor_element_type(input), correction),
+            )
+            result = self.world.app(callee, input)
+            output_dims = self.rules.reduce_shape_spec(
+                dims, dim=canonical, keepdim=keepdim
+            ).output_dims
+            return tuple(
+                self._remember_shape(result.proj(3, index), output_dims)
+                for index in (1, 2)
             )
 
         dim_values = [
@@ -2735,6 +2868,118 @@ class OperatorLibrary:
             self.world.lit_bool(cudnn_enabled),
         ]))
         return self._remember_shape(result, dims)
+
+    def native_batch_norm(
+        self, input, running_mean, running_var, weight=None, bias=None,
+        training=False, momentum=0.1, eps=1e-5,
+    ):
+        """Map the pure three-result training form of ``native_batch_norm``."""
+        if not training:
+            raise NotImplementedError(
+                "native_batch_norm inference returns zero-extent saved stats"
+            )
+        if running_mean is not None or running_var is not None:
+            raise NotImplementedError(
+                "native_batch_norm running-stat mutation must be functionalized"
+            )
+        dims = self.shape_of(input)
+        if len(dims) < 2:
+            raise NotImplementedError("native_batch_norm expects input rank >= 2")
+        channels = dims[1]
+        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            value_dims = self.shape_of(value)
+            if len(value_dims) != 1 or not self.rules._same_dim(
+                value_dims[0], channels
+            ):
+                raise ValueError(
+                    "native_batch_norm affine parameters must have shape [channels]"
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        callee = self.world.annex(
+            torch_dialect.normalization.native_batch_norm.value
+        )
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        callee = self.world.app(callee, self.world.tuple([
+            input, optional(weight), optional(bias),
+            optional(None), optional(None),
+        ]))
+        result = self.world.app(callee, self.world.tuple([
+            self.world.lit_bool(True),
+            self._float_lit(self._tensor_element_type(input), momentum),
+            self._float_lit(self._tensor_element_type(input), eps),
+        ]))
+        self._remember_shape(result.proj(3, 0), dims)
+        self._remember_shape(result.proj(3, 1), [channels])
+        self._remember_shape(result.proj(3, 2), [channels])
+        return result
+
+    def native_batch_norm_functional(
+        self, input, weight, bias, running_mean, running_var,
+        training, momentum, eps,
+    ):
+        """Return native outputs and functionalized running-stat updates."""
+        if not training:
+            raise NotImplementedError(
+                "functional native_batch_norm inference has zero-extent saved stats"
+            )
+        dims = self.shape_of(input)
+        if len(dims) < 2:
+            raise NotImplementedError("native_batch_norm expects input rank >= 2")
+        channels = dims[1]
+        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+
+        def optional(value):
+            if value is None:
+                return self.world.app(
+                    self.world.annex(option.none.value), channel_type
+                )
+            return self.world.implicit_app(
+                self.world.annex(option.some.value), value
+            )
+
+        for name, value in (("running_mean", running_mean),
+                            ("running_var", running_var)):
+            value_dims = self.shape_of(value)
+            if len(value_dims) != 1 or not self.rules._same_dim(
+                value_dims[0], channels
+            ):
+                raise ValueError(f"{name} must have shape [channels]")
+        callee = self.world.annex(
+            torch_dialect.normalization.native_batch_norm_functional.value
+        )
+        callee = self.world.app(
+            callee, self._torch_semantics(input, floating=True)
+        )
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
+        )
+        callee = self.world.app(callee, self.world.tuple([
+            input, optional(weight), optional(bias), running_mean, running_var,
+        ]))
+        result = self.world.app(callee, self.world.tuple([
+            self.world.lit_bool(True),
+            self._float_lit(self._tensor_element_type(input), momentum),
+            self._float_lit(self._tensor_element_type(input), eps),
+        ]))
+        for index, shape in enumerate(
+            [dims, [channels], [channels], [channels], [channels]]
+        ):
+            self._remember_shape(result.proj(5, index), shape)
+        return result
 
     def _tensor_reshape(self, x, shape):
         in_rank, in_shape_tuple = self._rank_and_shape(x)
@@ -3564,6 +3809,44 @@ class OperatorLibrary:
         result = self.world.app(result, x)
         return self._remember_shape(result, [*in_dims[:-1], output_size])
 
+    def adaptive_avg_pool2d(self, x, output_size):
+        in_dims = self.shape_of(x)
+        if len(in_dims) not in (3, 4):
+            raise NotImplementedError(
+                "adaptive_avg_pool2d requires rank-3 CHW or rank-4 NCHW input"
+            )
+        if isinstance(output_size, int):
+            output_size = (output_size, output_size)
+        else:
+            output_size = tuple(output_size)
+        if len(output_size) != 2:
+            raise ValueError("adaptive_avg_pool2d output_size must have length 2")
+        output_defs = [
+            in_dims[-2 + axis] if value is None else self._to_nat(value)
+            for axis, value in enumerate(output_size)
+        ]
+        if any(self._is_lit_nat_value(value, 0) for value in output_defs):
+            raise NotImplementedError(
+                "adaptive_avg_pool2d zero output extent requires an explicit tensor type boundary"
+            )
+        # Literal singleton axes are erased by MimIR's nested-array
+        # normalization. In that representation a global singleton pool is
+        # already the required value.
+        if all(
+            self._is_lit_nat_value(in_dims[-2 + axis], 1)
+            and self._is_lit_nat_value(output_defs[axis], 1)
+            for axis in range(2)
+        ):
+            return self._remember_shape(x, [*in_dims[:-2], *output_defs])
+        callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool2d.value)
+        callee = self.world.app(callee, self._torch_semantics(x, floating=True))
+        callee = self._apply_grouped(
+            callee, [self._lit_nat(len(in_dims)), self.world.tuple(in_dims)]
+        )
+        result = self.world.app(callee, self.world.tuple(output_defs))
+        result = self.world.app(result, x)
+        return self._remember_shape(result, [*in_dims[:-2], *output_defs])
+
     def adaptive_avg_pool3d(self, x, output_size):
         in_dims = self.shape_of(x)
         if len(in_dims) not in (4, 5):
@@ -3576,7 +3859,14 @@ class OperatorLibrary:
             output_size = tuple(output_size)
         if len(output_size) != 3:
             raise ValueError("adaptive_avg_pool3d output_size must have length 3")
-        output_defs = [self._to_nat(value) for value in output_size]
+        output_defs = [
+            in_dims[-3 + axis] if value is None else self._to_nat(value)
+            for axis, value in enumerate(output_size)
+        ]
+        if any(self._is_lit_nat_value(value, 0) for value in output_defs):
+            raise NotImplementedError(
+                "adaptive_avg_pool3d zero output extent requires an explicit tensor type boundary"
+            )
         callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(

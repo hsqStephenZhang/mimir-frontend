@@ -195,7 +195,7 @@ def test_cross_entropy_maps_directly_to_torch_semantics():
     )[0]
     result = translate_model(Model(), [logits, target])
 
-    assert "%torch.loss.cross_entropy_loss" in def_to_string(result)
+    assert "%torch.loss.cross_entropy" in def_to_string(result)
 
 
 def test_torch_min_tensor_overload_maps_to_binary_minimum():
@@ -1308,10 +1308,10 @@ def test_functional_depthwise_conv2d_translates_to_grouped_convolution():
     assert "%torch.conv.general" in def_to_string(result)
 
 
-def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
+def test_adaptive_avg_pool2d_maps_directly_to_torch_semantics():
     class Model(torch.nn.Module):
         def forward(self, x):
-            return torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
+            return torch.nn.functional.adaptive_avg_pool2d(x, (3, 4))
 
     world = make_world()
     x, = make_static_inputs_with_shapes(world, [(2, 3, 8, 8)])
@@ -1320,8 +1320,8 @@ def test_adaptive_avg_pool2d_output_one_translates_to_mean_keepdim():
     result = translator.translate(traced.graph, [x])
     ir = def_to_string(result)
 
-    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1]
-    assert "%torch.reduction.mean" in ir
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 3, 4]
+    assert "%torch.pool.adaptive_avg_pool2d" in ir
 
 
 def test_adaptive_avg_pool2d_folded_singletons_is_identity():
@@ -1339,6 +1339,35 @@ def test_adaptive_avg_pool2d_folded_singletons_is_identity():
 
     assert result == input_def
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "output_size, expected", [(3, [2, 3, 3, 3]), ((None, 4), [2, 3, 8, 4])]
+)
+def test_adaptive_avg_pool2d_output_size_surface(output_size, expected):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool2d(x, output_size)
+
+    world = make_world()
+    result = translate_model(
+        Model(), make_static_inputs_with_shapes(world, [(2, 3, 8, 7)])
+    )
+
+    assert tensor_shape_values(result) == expected
+    assert "%torch.pool.adaptive_avg_pool2d" in def_to_string(result)
+
+
+def test_adaptive_avg_pool_zero_output_extent_is_explicitly_unsupported():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool2d(x, (0, 3))
+
+    world = make_world()
+    with pytest.raises(NotImplementedError, match="tensor type boundary"):
+        translate_model(
+            Model(), make_static_inputs_with_shapes(world, [(2, 3, 8, 7)])
+        )
 
 
 def test_functional_batch_norm_inference_translates():
@@ -1380,6 +1409,73 @@ def test_aten_batch_norm_inference_translates():
 
     assert tensor_shape_values(result) == [2, 4, 8, 8]
     assert "%torch.normalization.batch_norm" in def_to_string(result)
+
+
+def test_native_batch_norm_training_maps_to_three_result_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias):
+            return torch.ops.aten.native_batch_norm.default(
+                x, weight, bias, None, None, True, 0.1, 1e-5
+            )
+
+    world = make_world()
+    result = translate_model(
+        Model(),
+        make_static_inputs_with_shapes(
+            world, [(2, 3, 4, 5), (3,), (3,)]
+        ),
+    )
+
+    assert "%torch.normalization.native_batch_norm" in def_to_string(result)
+    assert tensor_shape_values(result.proj(3, 0)) == [2, 3, 4, 5]
+    assert tensor_shape_values(result.proj(3, 1)) == [3]
+    assert tensor_shape_values(result.proj(3, 2)) == [3]
+
+
+@pytest.mark.parametrize("training, with_running_stats", [(False, True), (True, True)])
+def test_native_batch_norm_requires_functionalized_training_form(
+    training, with_running_stats
+):
+    class Model(torch.nn.Module):
+        def forward(self, x, running_mean, running_var):
+            return torch.ops.aten.native_batch_norm.default(
+                x, None, None,
+                running_mean if with_running_stats else None,
+                running_var if with_running_stats else None,
+                training, 0.1, 1e-5,
+            )
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 3, 4, 5), (3,), (3,)]
+    )
+    message = (
+        "zero-extent saved stats" if not training
+        else "running-stat mutation must be functionalized"
+    )
+    with pytest.raises(NotImplementedError, match=message):
+        translate_model(Model(), inputs)
+
+
+def test_functional_native_batch_norm_returns_updated_running_stats():
+    class Model(torch.nn.Module):
+        def forward(self, x, weight, bias, running_mean, running_var):
+            return torch.ops.aten._native_batch_norm_legit_functional.default(
+                x, weight, bias, running_mean, running_var,
+                True, 0.25, 1e-5,
+            )
+
+    world = make_world()
+    result = translate_model(
+        Model(), make_static_inputs_with_shapes(
+            world, [(2, 3, 4, 5), (3,), (3,), (3,), (3,)]
+        )
+    )
+
+    assert "%torch.normalization.native_batch_norm_functional" in def_to_string(result)
+    assert [tensor_shape_values(result.proj(5, i)) for i in range(5)] == [
+        [2, 3, 4, 5], [3], [3], [3], [3]
+    ]
 
 
 def test_functional_group_norm_maps_directly_to_torch_semantics():
@@ -1469,6 +1565,22 @@ def test_triplet_margin_loss_maps_directly_to_torch_semantics(reduction, swap):
     assert "%torch.loss.triplet_margin_loss" in def_to_string(result)
 
 
+def test_triplet_margin_rank3_maps_directly_to_torch_semantics():
+    class Model(torch.nn.Module):
+        def forward(self, anchor, positive, negative):
+            return torch.nn.functional.triplet_margin_loss(
+                anchor, positive, negative, reduction="none"
+            )
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(
+        world, [(2, 3, 5), (2, 3, 5), (2, 3, 5)]
+    )
+    result = translate_model(Model(), inputs)
+
+    assert "%torch.loss.triplet_margin_loss" in def_to_string(result)
+
+
 def test_generic_loss_parameter_surfaces_translate():
     class Model(torch.nn.Module):
         def forward(self, x, broadcast_target, kl_target, a, p, n):
@@ -1516,7 +1628,7 @@ def test_cross_entropy_full_index_and_probability_surfaces_translate():
         world, [(2, 3, 4)], elem_type=ops.I64
     )[0]
     index_result = translate_model(IndexModel(), [logits, target, weight])
-    assert "%torch.loss.cross_entropy_loss" in def_to_string(index_result)
+    assert "%torch.loss.cross_entropy" in def_to_string(index_result)
 
     probability_target = make_static_inputs_with_shapes(
         world, [(2, 5, 3, 4)]
@@ -1524,7 +1636,7 @@ def test_cross_entropy_full_index_and_probability_surfaces_translate():
     probability_result = translate_model(
         ProbabilityModel(), [logits, probability_target, weight]
     )
-    assert "%torch.loss.cross_entropy_probability_loss" in def_to_string(
+    assert "%torch.loss.cross_entropy" in def_to_string(
         probability_result
     )
 
@@ -2385,11 +2497,11 @@ def test_lenet_style_cnn_with_pooling_translates():
 @pytest.mark.parametrize(
     "dim,keepdim,expected_shape,expected_op",
     [
-        (None, False, [], "%torch.reduction.sum_all"),
-        (0, False, [3, 4], "%torch.reduction.sum"),
-        (1, True, [2, 1, 4], "%torch.reduction.sum"),
-        ((1, 2), False, [2], "%torch.reduction.sum"),
-        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum"),
+        (None, False, [], "%torch.reduction.sum_typed_all"),
+        (0, False, [3, 4], "%torch.reduction.sum_typed"),
+        (1, True, [2, 1, 4], "%torch.reduction.sum_typed"),
+        ((1, 2), False, [2], "%torch.reduction.sum_typed"),
+        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum_typed"),
     ],
 )
 def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape, expected_op):
@@ -2426,7 +2538,7 @@ def test_sum_empty_dimensions_reduce_all(dim):
     )
 
     assert translator.ops.shape_of(result) == []
-    assert "%torch.reduction.sum_all" in def_to_string(result)
+    assert "%torch.reduction.sum_typed_all" in def_to_string(result)
 
 
 @pytest.mark.parametrize("dim", [[], ()])
@@ -2685,7 +2797,7 @@ def test_var_mean_dim_overload_maps_unbiased_to_correction(unbiased):
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("dim,keepdim", [(None, False), (0, True)])
-def test_var_mean_rank_zero_result_is_explicitly_unsupported(
+def test_var_mean_rank_zero_result_uses_scalar_abi(
     shape_kind, dim, keepdim
 ):
     class Model(torch.nn.Module):
@@ -2695,11 +2807,53 @@ def test_var_mean_rank_zero_result_is_explicitly_unsupported(
             )
 
     world = make_world()
-    with pytest.raises(
-        NotImplementedError,
-        match="rank-0 tensor",
-    ):
-        translate_model(Model(), make_inputs(world, 1, shape_kind, 1))
+    result = translate_model(Model(), make_inputs(world, 1, shape_kind, 1))
+
+    assert isinstance(result, tuple)
+    ir = "\n".join(def_to_string(item) for item in result)
+    assert "%torch.reduction.var_mean_all" in ir
+
+
+def test_var_mean_folded_singleton_axis_uses_unit_reduction():
+    world = make_world()
+    ops = FXGraphTranslator(world).ops
+    x = make_static_inputs_with_shapes(world, [(2, 1, 3)])[0]
+    ops._remember_shape(
+        x, [world.lit_nat(2), world.lit_nat(1), world.lit_nat(3)]
+    )
+    result = ops.var_mean(x, dim=1, correction=1)
+
+    ir = "\n".join(def_to_string(item) for item in result)
+    assert "%torch.reduction.var_mean_singletons" in ir
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float32])
+def test_sum_dtype_maps_to_typed_reduction(dtype):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.sum(x, dim=1, dtype=dtype)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(
+        world, [(2, 3)], elem_type=world.type_i64()
+    )[0]
+    result = translate_model(Model(), [x])
+
+    assert "%torch.reduction.sum_typed" in def_to_string(result)
+
+
+def test_integer_mean_with_float_dtype_maps_conversion_and_reduction():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.mean(x, dim=1, dtype=torch.float32)
+
+    world = make_world()
+    x = make_static_inputs_with_shapes(
+        world, [(2, 3)], elem_type=world.type_i64()
+    )[0]
+    result = translate_model(Model(), [x])
+
+    assert "%torch.reduction.mean" in def_to_string(result)
 
 def test_bitwise_and_logical_not():
     class Model(torch.nn.Module):
