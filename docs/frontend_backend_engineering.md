@@ -31,12 +31,21 @@ benchmarking, and a reproducible debug manifest.
    options, fingerprints, artifacts, and success/failure diagnostics. Tensor
    values and model weights are never serialized.
 
+## Level 1 Closure
+
+MimIR commit `5e8537cdec` adds the API-level
+`%torch.loss.cross_entropy_mean_2d` axiom and decomposes it through stable
+log-softmax, checked gather, negation, and mean reduction. Frontend commit
+`f1404a6` maps the default PyTorch API, adds typed KernelBench fixtures, and
+provides direct-mapping and numerical E2E tests. This changes the Level 1 result
+from 99 PASS plus one invalid fixture to 100/100 executable PASS.
+
 ## Validation
 
 - Backend infrastructure and focused native lifecycle/manifest tests pass.
 - The benchmark runner has 9 unit tests; an eager/MimIR MLP smoke run passed
   numerical comparison under a 16 GiB subprocess limit.
-- KernelBench Level 1: 99 PASS, 1 eager-invalid, 0 compiler failures.
+- KernelBench Level 1: 100 PASS, 0 invalid, 0 compiler failures.
 - KernelBench Level 2 at 512 fixed-point iterations: 96 PASS, 3 eager-invalid,
   1 tensor-to-memory failure.
 - KernelBench Level 3: all 27 maintained fixtures pass; 21 native models have no
