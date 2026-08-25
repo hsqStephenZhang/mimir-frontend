@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import resource
 import sys
 
 import pytest
@@ -207,3 +208,23 @@ def test_suite_coverage_rejects_invalid_or_empty_suites_by_default():
 
     assert not runner.evaluate_coverage([invalid], allow_invalid=False).meets(0.0)
     assert not runner.evaluate_coverage([invalid], allow_invalid=True).meets(0.0)
+
+
+def test_memory_limit_clamps_soft_limit_to_finite_hard_limit(monkeypatch):
+    finite_hard_limit = 2 * 1024**3
+    calls = []
+
+    monkeypatch.setattr(
+        runner.resource,
+        "getrlimit",
+        lambda _: (resource.RLIM_INFINITY, finite_hard_limit),
+    )
+    monkeypatch.setattr(
+        runner.resource,
+        "setrlimit",
+        lambda resource_type, limits: calls.append((resource_type, limits)),
+    )
+
+    runner.apply_memory_limit(4)
+
+    assert calls == [(resource.RLIMIT_AS, (finite_hard_limit, finite_hard_limit))]

@@ -92,7 +92,10 @@ def apply_memory_limit(max_memory_gb: int) -> None:
     limit = max_memory_gb * 1024**3
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     hard_limit = limit if hard == resource.RLIM_INFINITY else min(hard, limit)
+    # Some hosted runners expose a finite hard limit below the requested
+    # budget.  The soft limit must never exceed that effective hard limit.
     soft_limit = limit if soft == resource.RLIM_INFINITY else min(soft, limit)
+    soft_limit = min(soft_limit, hard_limit)
     resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
 
 

@@ -76,6 +76,7 @@ def apply_memory_limit(max_memory_gb: int) -> None:
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     new_hard = limit if hard == resource.RLIM_INFINITY else min(hard, limit)
     new_soft = limit if soft == resource.RLIM_INFINITY else min(soft, limit)
+    new_soft = min(new_soft, new_hard)
     resource.setrlimit(resource.RLIMIT_AS, (new_soft, new_hard))
 
 
