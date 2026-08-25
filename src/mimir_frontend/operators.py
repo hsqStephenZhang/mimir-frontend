@@ -2535,9 +2535,9 @@ class OperatorLibrary:
         lhs_dims = self._physical_dims(self.shape_of(lhs))
         rhs_dims = self._physical_dims(self.shape_of(rhs))
         if len(lhs_dims) != 3 or len(rhs_dims) != 3:
-            if len(lhs_dims) > 3 and len(rhs_dims) > 3:
-                return self.matmul(lhs, rhs)
-            raise ValueError("aten.bmm expects two rank-3 tensors")
+            # Composite attention graphs can expose folded operands on either
+            # side; matmul owns the resulting broadcast semantics.
+            return self.matmul(lhs, rhs)
 
         batch, rows, contract = lhs_dims
         rhs_batch, rhs_contract, cols = rhs_dims

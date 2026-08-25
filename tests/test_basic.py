@@ -777,6 +777,20 @@ def test_composite_high_rank_bmm_normalizes_to_torch_matmul():
     assert "%torch.linalg.bmm" not in ir
 
 
+def test_mixed_rank_bmm_normalizes_to_torch_matmul():
+    class Model(torch.nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.ops.aten.bmm.default(lhs, rhs)
+
+    world = make_world()
+    lhs, rhs = make_static_inputs_with_shapes(
+        world, [(1, 4, 8), (2, 3, 8, 16)]
+    )
+    result = translate_model(Model(), [lhs, rhs])
+    assert tensor_shape_values(result) == [2, 3, 4, 16]
+    assert "%torch.linalg.matmul" in def_to_string(result)
+
+
 def test_matmul_passes_unbroadcasted_batch_prefix_to_torch_matmul():
     class Model(torch.nn.Module):
         def forward(self, lhs, rhs):
