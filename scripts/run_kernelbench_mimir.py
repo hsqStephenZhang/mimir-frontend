@@ -204,7 +204,13 @@ def discover_cases(
         for yaml_path in (examples / f"{level}.yaml", fixtures / f"{level}.yaml"):
             if yaml_path.exists():
                 for case in yaml.safe_load(yaml_path.read_text()) or []:
-                    yaml_cases[case["kernel"]] = {**case, "fixture": "yaml"}
+                    # Local overlays may intentionally replace only one field (for example, a scaled
+                    # shape override) while inheriting the authoritative Lighthouse fixture metadata.
+                    yaml_cases[case["kernel"]] = {
+                        **yaml_cases.get(case["kernel"], {}),
+                        **case,
+                        "fixture": "yaml",
+                    }
 
     corpus = lighthouse / "third_party/KernelBench/KernelBench"
     cases: list[dict[str, Any]] = []

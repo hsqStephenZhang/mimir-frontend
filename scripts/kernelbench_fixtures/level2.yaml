@@ -1,0 +1,9 @@
+# Scaled shape overrides for fixtures whose inputs are derived from ConvTranspose output shapes.
+- kernel: level2/3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU.py
+  scaled_input_shapes: [8x8x8x8x4]
+
+- kernel: level2/26_ConvTranspose3d_Add_HardSwish.py
+  scaled_input_shapes: [8x8x8x8x8, 8x8x16x16x16]
+
+- kernel: level2/34_ConvTranspose3d_LayerNorm_GELU_Scaling.py
+  scaled_input_shapes: [8x8x4x4x4]

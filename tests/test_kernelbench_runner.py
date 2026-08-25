@@ -42,6 +42,34 @@ def test_discover_cases_merges_yaml_and_source_corpus(tmp_path: Path):
     assert [case["fixture"] for case in cases] == ["yaml", "native"]
 
 
+def test_discover_cases_merges_local_fixture_overlays(tmp_path: Path):
+    corpus = tmp_path / "third_party/KernelBench/KernelBench/level2"
+    corpus.mkdir(parents=True)
+    (corpus / "3_A.py").write_text("")
+    examples = tmp_path / "examples/KernelBench"
+    examples.mkdir(parents=True)
+    (examples / "level2.yaml").write_text(
+        yaml.safe_dump([{
+            "kernel": "level2/3_A.py",
+            "input_shapes": ["32x32"],
+            "initializations": ["rnd"],
+        }])
+    )
+    overlays = tmp_path / "overlays"
+    overlays.mkdir()
+    (overlays / "level2.yaml").write_text(
+        yaml.safe_dump([{
+            "kernel": "level2/3_A.py",
+            "scaled_input_shapes": ["8x4"],
+        }])
+    )
+
+    cases = runner.discover_cases(tmp_path, ("level2",), overlays)
+
+    assert cases[0]["input_shapes"] == ["32x32"]
+    assert cases[0]["scaled_input_shapes"] == ["8x4"]
+
+
 def test_native_fixture_requires_unscaled_execution(tmp_path: Path):
     case = {"kernel": "level3/1_A.py", "fixture": "native"}
     model = tmp_path / "third_party/KernelBench/KernelBench/level3/1_A.py"
