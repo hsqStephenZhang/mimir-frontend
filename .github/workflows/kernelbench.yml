@@ -76,17 +76,31 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang ninja-build
+          sudo apt-get install -y g++-14 clang ninja-build
+          echo "CC=gcc-14" >> "${GITHUB_ENV}"
+          echo "CXX=g++-14" >> "${GITHUB_ENV}"
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
-        run: brew install ninja
+        run: |
+          brew install llvm ninja
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> "${GITHUB_ENV}"
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "${GITHUB_ENV}"
+          echo "${LLVM_PREFIX}/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify C++23 toolchain
+        shell: bash
+        run: |
+          "${CXX}" --version
+          printf '#include <print>\nint main() { std::print("ok\\n"); }\n' \
+            | "${CXX}" -std=c++23 -x c++ -fsyntax-only -
 
       - name: Restore MimIR build cache
         uses: actions/cache@v4
         with:
           path: MimIR/build
-          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-64ef770cff
+          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-cxx23-v2-64ef770cff
 
       - name: Build MimIR and install frontend
         shell: bash
