@@ -2441,7 +2441,15 @@ def test_adaptive_avg_pool1d_uses_torch_semantics():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.pool.adaptive_avg_pool1d" in def_to_string(result)
+    # Global 1-D adaptive pooling is decomposed to mean over the spatial axis;
+    # this avoids a singleton dependent shape that MimIR normalizes away.
+    assert "%torch.pool.adaptive_avg_pool1d" not in def_to_string(result)
+
+
+def test_translator_accepts_string_eq_fx_target():
+    translator = FXGraphTranslator(make_world())
+
+    assert "__eq__" in translator.convert_map
 
 
 def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
@@ -2456,7 +2464,7 @@ def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
     # Literal-one nested array axes normalize away in the physical MimIR type;
     # the frontend shape cache and FX output metadata preserve logical NC111.
     assert tensor_shape_values(result) == [2, 3]
-    assert "%torch.pool.adaptive_avg_pool3d" in def_to_string(result)
+    assert "%torch.pool.adaptive_avg_pool3d" not in def_to_string(result)
 
 
 def test_max_pool3d_preserves_full_parameter_semantics():

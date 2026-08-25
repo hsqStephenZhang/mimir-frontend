@@ -3799,6 +3799,11 @@ class OperatorLibrary:
                 "adaptive_avg_pool1d requires rank-2 CL or rank-3 NCL input"
             )
         output_size = self._single(output_size, "output_size")
+        # Adaptive average pooling to one element is exactly a mean over the
+        # last spatial axis.  Keeping this common case in the reduction path
+        # avoids exposing a singleton dependent output shape to normalization.
+        if output_size == 1 or self._is_lit_nat_value(output_size, 1):
+            return self.mean(x, dim=[len(in_dims) - 1], keepdim=True)
         output_size = self._to_nat(output_size)
         callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))

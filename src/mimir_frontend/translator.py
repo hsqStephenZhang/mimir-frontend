@@ -48,6 +48,12 @@ class FXGraphTranslator:
             for name in names:
                 m[name] = wrapper
 
+        # Some exported FX graphs spell Python's tensor comparison method as a string target
+        # rather than retaining `operator.eq` or an `aten.eq` overload.  Treat it identically to
+        # the regular equality mapping; the operands still go through OperatorLibrary's dtype and
+        # broadcast checks.
+        m["__eq__"] = self._wrap_binary(self.ops.eq)
+
         # `aten.add` and `aten.sub` have a keyword-only alpha parameter. Keep
         # it at the Torch boundary instead of silently dropping it in the
         # generic two-argument wrapper.
