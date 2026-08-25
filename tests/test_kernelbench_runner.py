@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 
+import pytest
 import torch
 import yaml
 
@@ -169,3 +170,40 @@ def test_vanilla_rnn_fixture_preserves_loop_carried_state():
     assert case["input_shapes"] == ["4x2x16", "2x16"]
     assert case["init_args"] == [16, 16, 8]
     assert case["max_fp_iters"] == 512
+
+
+def test_suite_coverage_can_exclude_invalid_fixtures():
+    results = [
+        runner.CaseResult("pass.py", "PASS", "compare", 1.0),
+        runner.CaseResult("invalid.py", "INVALID", "fixture", 0.1),
+    ]
+
+    summary = runner.evaluate_coverage(results, allow_invalid=True)
+
+    assert summary.passed == 1
+    assert summary.eligible == 1
+    assert summary.invalid == 1
+    assert summary.pass_rate == 1.0
+    assert summary.meets(1.0)
+
+
+def test_suite_coverage_counts_real_failures():
+    results = [
+        runner.CaseResult("pass.py", "PASS", "compare", 1.0),
+        runner.CaseResult("fail.py", "FAIL", "compile_execute", 1.0),
+        runner.CaseResult("timeout.py", "TIMEOUT", "compile_execute", 1.0),
+    ]
+
+    summary = runner.evaluate_coverage(results, allow_invalid=True)
+
+    assert summary.passed == 1
+    assert summary.eligible == 3
+    assert summary.pass_rate == pytest.approx(1 / 3)
+    assert not summary.meets(0.5)
+
+
+def test_suite_coverage_rejects_invalid_or_empty_suites_by_default():
+    invalid = runner.CaseResult("invalid.py", "INVALID", "fixture", 0.1)
+
+    assert not runner.evaluate_coverage([invalid], allow_invalid=False).meets(0.0)
+    assert not runner.evaluate_coverage([invalid], allow_invalid=True).meets(0.0)

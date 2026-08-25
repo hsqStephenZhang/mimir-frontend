@@ -1,0 +1,117 @@
+name: KernelBench
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  kernelbench:
+    name: ${{ matrix.platform }} / ${{ matrix.level }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            level: level1
+            min_pass_rate: "1.00"
+          - platform: linux
+            runner: ubuntu-24.04
+            level: level2
+            min_pass_rate: "0.95"
+          - platform: linux
+            runner: ubuntu-24.04
+            level: level3
+            min_pass_rate: "1.00"
+          - platform: macos
+            runner: macos-15
+            level: level1
+            min_pass_rate: "1.00"
+          - platform: macos
+            runner: macos-15
+            level: level2
+            min_pass_rate: "0.95"
+          - platform: macos
+            runner: macos-15
+            level: level3
+            min_pass_rate: "1.00"
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      MIMIR_BUILD_JOBS: "3"
+      MIMIR_CACHE_DIR: ${{ github.workspace }}/.ci-cache/${{ matrix.platform }}-${{ matrix.level }}
+      # Standard public Linux runners have 16 GB RAM, private runners 8 GB;
+      # The macos-15 M1 runner has 7 GB. Leave room for the parent,
+      # compiler toolchain, and runner services around the limited case process.
+      CASE_MEMORY_GB: ${{ matrix.platform == 'linux' && (github.event.repository.private && '6' || '12') || '4' }}
+
+    steps:
+      - name: Checkout frontend and MimIR
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout pinned Lighthouse fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: libxsmm/lighthouse
+          ref: d330e7628298207aca4ce2d7d67277c50c867d85
+          path: lighthouse
+          submodules: recursive
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Restore MimIR build cache
+        uses: actions/cache@v4
+        with:
+          path: MimIR/build
+          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-64ef770cff
+
+      - name: Build MimIR and install frontend
+        shell: bash
+        run: |
+          ./scripts/bootstrap_mimir.sh
+          uv pip install einops pyyaml
+
+      - name: Run ${{ matrix.level }}
+        shell: bash
+        run: |
+          uv run --no-sync python scripts/run_kernelbench_mimir.py \
+            --lighthouse lighthouse \
+            --suite ${{ matrix.level }} \
+            --size-divisor 16 \
+            --timeout 300 \
+            --max-memory-gb "${CASE_MEMORY_GB}" \
+            --max-fp-iters 512 \
+            --allow-invalid \
+            --min-pass-rate ${{ matrix.min_pass_rate }} \
+            --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelbench-${{ matrix.platform }}-${{ matrix.level }}
+          path: kernelbench-${{ matrix.platform }}-${{ matrix.level }}.json
+          if-no-files-found: warn

@@ -4,4 +4,4 @@
 [submodule "MimIR"]
 	path = MimIR
 	url = https://github.com/hsqStephenZhang/MimIR.git
-	branch = feature/tensor-ops-ext
+	branch = feat/torch-plugin

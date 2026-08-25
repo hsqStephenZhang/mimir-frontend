@@ -51,6 +51,35 @@ class CaseResult:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CoverageSummary:
+    passed: int
+    eligible: int
+    invalid: int
+    invalid_allowed: bool
+
+    @property
+    def pass_rate(self) -> float:
+        return self.passed / self.eligible if self.eligible else 0.0
+
+    def meets(self, minimum: float) -> bool:
+        return (
+            self.eligible > 0
+            and (self.invalid_allowed or self.invalid == 0)
+            and self.pass_rate >= minimum
+        )
+
+
+def evaluate_coverage(
+    results: list[CaseResult], *, allow_invalid: bool
+) -> CoverageSummary:
+    """Compute coverage over executable fixtures without hiding real failures."""
+    invalid = sum(result.status == "INVALID" for result in results)
+    eligible = len(results) - invalid if allow_invalid else len(results)
+    passed = sum(result.status == "PASS" for result in results)
+    return CoverageSummary(passed, eligible, invalid, allow_invalid)
+
+
 def apply_memory_limit(max_memory_gb: int) -> None:
     """Bound one direct-case process before compiler allocations begin.
 
@@ -329,6 +358,17 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument(
+        "--allow-invalid",
+        action="store_true",
+        help="exclude fixtures rejected before MimIR execution from coverage",
+    )
+    parser.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=1.0,
+        help="minimum PASS fraction among eligible cases (default: 1.0)",
+    )
+    parser.add_argument(
         "--max-memory-gb",
         type=int,
         default=DEFAULT_MAX_MEMORY_GB,
@@ -368,6 +408,8 @@ def main() -> int:
         cases = [case for case in cases if args.case == case["kernel"]]
     if args.shard_count <= 0 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard-index must be in [0, shard-count)")
+    if not 0.0 <= args.min_pass_rate <= 1.0:
+        parser.error("--min-pass-rate must be in [0, 1]")
     if not args.case and args.shard_count != 1:
         cases = [case for index, case in enumerate(cases) if index % args.shard_count == args.shard_index]
 
@@ -445,9 +487,14 @@ def main() -> int:
 
     selected = {case["kernel"] for case in cases}
     selected_results = [result for result in results if result.kernel in selected]
-    passed_count = sum(result.status == "PASS" for result in selected_results)
-    print(f"\n{passed_count}/{len(selected_results)} passed")
-    return 0 if all(result.status == "PASS" for result in selected_results) else 1
+    coverage = evaluate_coverage(
+        selected_results, allow_invalid=args.allow_invalid
+    )
+    print(
+        f"\n{coverage.passed}/{coverage.eligible} eligible cases passed "
+        f"({coverage.pass_rate:.1%}); {coverage.invalid} invalid"
+    )
+    return 0 if coverage.meets(args.min_pass_rate) else 1
 
 
 if __name__ == "__main__":
