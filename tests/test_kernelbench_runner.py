@@ -228,3 +228,19 @@ def test_memory_limit_clamps_soft_limit_to_finite_hard_limit(monkeypatch):
     runner.apply_memory_limit(4)
 
     assert calls == [(resource.RLIMIT_AS, (finite_hard_limit, finite_hard_limit))]
+
+
+def test_memory_limit_ignores_unsupported_macos_rlimit(monkeypatch):
+    monkeypatch.setattr(runner.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        runner.resource,
+        "getrlimit",
+        lambda _: (resource.RLIM_INFINITY, resource.RLIM_INFINITY),
+    )
+    monkeypatch.setattr(
+        runner.resource,
+        "setrlimit",
+        lambda *_: (_ for _ in ()).throw(ValueError("unsupported")),
+    )
+
+    runner.apply_memory_limit(4)

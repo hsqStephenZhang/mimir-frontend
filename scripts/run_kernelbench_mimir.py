@@ -96,7 +96,15 @@ def apply_memory_limit(max_memory_gb: int) -> None:
     # budget.  The soft limit must never exceed that effective hard limit.
     soft_limit = limit if soft == resource.RLIM_INFINITY else min(soft, limit)
     soft_limit = min(soft_limit, hard_limit)
-    resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
+    except (OSError, ValueError):
+        # macOS may expose RLIMIT_AS but reject changing it.  Keep the
+        # per-case size and timeout guards active instead of failing every
+        # case before the backend is invoked.
+        if sys.platform != "darwin":
+            raise
+        warnings.warn("RLIMIT_AS is unavailable; continuing without it")
 
 
 def load_module(path: Path) -> ModuleType:
