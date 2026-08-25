@@ -3829,6 +3829,16 @@ class OperatorLibrary:
             raise NotImplementedError(
                 "adaptive_avg_pool2d zero output extent requires an explicit tensor type boundary"
             )
+        if all(self._is_lit_nat_value(value, 1) for value in output_defs):
+            # Global average pooling is exactly a spatial mean with retained
+            # dimensions.  Keeping this decomposition in the Torch layer
+            # avoids instantiating the generic dynamic-window generator when
+            # PE has already selected the common model case.
+            return self.mean(
+                x,
+                dim=[len(in_dims) - 2, len(in_dims) - 1],
+                keepdim=True,
+            )
         # Literal singleton axes are erased by MimIR's nested-array
         # normalization. In that representation a global singleton pool is
         # already the required value.
@@ -3866,6 +3876,14 @@ class OperatorLibrary:
         if any(self._is_lit_nat_value(value, 0) for value in output_defs):
             raise NotImplementedError(
                 "adaptive_avg_pool3d zero output extent requires an explicit tensor type boundary"
+            )
+        if all(self._is_lit_nat_value(value, 1) for value in output_defs):
+            # Global average pooling is exactly a spatial mean with retained
+            # dimensions; PE removes the generic adaptive-window path.
+            return self.mean(
+                x,
+                dim=[len(in_dims) - 3, len(in_dims) - 2, len(in_dims) - 1],
+                keepdim=True,
             )
         callee = self.world.annex(torch_dialect.pool.adaptive_avg_pool3d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))

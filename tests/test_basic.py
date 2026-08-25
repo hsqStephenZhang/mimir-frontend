@@ -1341,6 +1341,40 @@ def test_adaptive_avg_pool2d_folded_singletons_is_identity():
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 1, 1]
 
 
+def test_global_adaptive_avg_pool2d_decomposes_to_spatial_mean():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(world, [(2, 3, 8, 6)])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(traced.graph, inputs)
+    ir = def_to_string(result)
+
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1]
+    assert "%torch.reduction.mean" in ir
+    assert "%torch.pool.adaptive_avg_pool2d" not in ir
+
+
+def test_global_adaptive_avg_pool3d_decomposes_to_spatial_mean():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.adaptive_avg_pool3d(x, (1, 1, 1))
+
+    world = make_world()
+    inputs = make_static_inputs_with_shapes(world, [(2, 3, 4, 6, 8)])
+    traced = fx.symbolic_trace(Model())
+    translator = FXGraphTranslator(world, module=traced)
+    result = translator.translate(traced.graph, inputs)
+    ir = def_to_string(result)
+
+    assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 3, 1, 1, 1]
+    assert "%torch.reduction.mean" in ir
+    assert "%torch.pool.adaptive_avg_pool3d" not in ir
+
+
 @pytest.mark.parametrize(
     "output_size, expected", [(3, [2, 3, 3, 3]), ((None, 4), [2, 3, 8, 4])]
 )
