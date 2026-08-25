@@ -155,3 +155,17 @@
   init_args: [16, 4, 16]
   input_shapes: [2x16x16]
   initializations: [rnd]
+
+# These two DenseNet building blocks have independently configurable channel
+# and layer counts, so their reduced fixtures preserve the original contracts.
+- kernel: level3/13_DenseNet121TransitionLayer.py
+  scalable: false
+  init_args: [8, 16]
+  input_shapes: [1x8x16x16]
+  initializations: [rnd]
+
+- kernel: level3/14_DenseNet121DenseBlock.py
+  scalable: false
+  init_args: [2, 8, 4]
+  input_shapes: [1x8x16x16]
+  initializations: [rnd]

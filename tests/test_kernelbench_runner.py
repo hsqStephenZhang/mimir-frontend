@@ -227,6 +227,24 @@ def test_vanilla_rnn_fixture_preserves_loop_carried_state():
     assert case["max_fp_iters"] == 512
 
 
+def test_densenet_component_fixtures_preserve_reduced_shape_contracts():
+    cases = {
+        case["kernel"]: case
+        for case in yaml.safe_load(
+            (runner.DEFAULT_FIXTURES / "level3.yaml").read_text()
+        )
+    }
+
+    assert cases["level3/13_DenseNet121TransitionLayer.py"]["init_args"] == [8, 16]
+    assert cases["level3/13_DenseNet121TransitionLayer.py"]["input_shapes"] == [
+        "1x8x16x16"
+    ]
+    assert cases["level3/14_DenseNet121DenseBlock.py"]["init_args"] == [2, 8, 4]
+    assert cases["level3/14_DenseNet121DenseBlock.py"]["input_shapes"] == [
+        "1x8x16x16"
+    ]
+
+
 def test_suite_coverage_can_exclude_invalid_fixtures():
     results = [
         runner.CaseResult("pass.py", "PASS", "compare", 1.0),
