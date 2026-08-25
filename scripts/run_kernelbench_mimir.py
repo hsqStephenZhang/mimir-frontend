@@ -174,6 +174,19 @@ def parse_init_args(value: Any, module: ModuleType, divisor: int) -> list[Any]:
     return [scale_init_arg(item, divisor) for item in value]
 
 
+def fixture_input_shapes(case: dict[str, Any], divisor: int) -> list[str | int]:
+    """Select shape specs while allowing fixtures to preserve derived shape relations.
+
+    Independent extent scaling is sufficient for most fixtures, but it cannot preserve relations such as
+    ``ConvTranspose3d(input).shape == residual.shape`` or ``LayerNorm(normalized_shape)`` matching the
+    final dimension.  A scaled override is only used for reduced runs; divisor 1 remains the authoritative
+    KernelBench fixture.
+    """
+    if divisor != 1 and case.get("scaled_input_shapes") is not None:
+        return case["scaled_input_shapes"]
+    return case["input_shapes"]
+
+
 def numeric_kernel_key(path: Path) -> tuple[int, str]:
     prefix = path.stem.split("_", 1)[0]
     return (int(prefix) if prefix.isdigit() else sys.maxsize, path.name)
@@ -239,12 +252,18 @@ def prepare_case(
             dtypes = case.get(
                 "dtypes", ["float32"] * len(case["input_shapes"])
             )
+            input_shapes = fixture_input_shapes(case, fixture_divisor)
+            shape_divisor = (
+                1
+                if fixture_divisor != 1 and case.get("scaled_input_shapes") is not None
+                else fixture_divisor
+            )
             inputs = [
                 make_input(
-                    parse_shape(shape, fixture_divisor), initialization, dtype
+                    parse_shape(shape, shape_divisor), initialization, dtype
                 )
                 for shape, initialization, dtype in zip(
-                    case["input_shapes"],
+                    input_shapes,
                     case["initializations"],
                     dtypes,
                     strict=True,

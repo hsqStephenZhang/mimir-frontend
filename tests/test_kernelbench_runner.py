@@ -86,6 +86,32 @@ def test_fixed_fixture_is_not_rescaled(tmp_path: Path):
     assert inputs[0].shape == (8, 32)
 
 
+def test_scaled_input_shape_override_preserves_derived_shape(tmp_path: Path):
+    case = {
+        "kernel": "level2/26_ConvTranspose3d_Add_HardSwish.py",
+        "fixture": "yaml",
+        "init_args": [],
+        "input_shapes": ["128x32x16x16x16", "128x64x32x32x32"],
+        "scaled_input_shapes": ["8x8x8x8x8", "8x8x16x16x16"],
+        "initializations": ["rnd", "rnd"],
+    }
+    model = tmp_path / "third_party/KernelBench/KernelBench/level2/26_ConvTranspose3d_Add_HardSwish.py"
+    model.parent.mkdir(parents=True)
+    model.write_text(
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def __init__(self): super().__init__()\n"
+        "    def forward(self, x, residual): return x + residual\n"
+    )
+
+    _, inputs = runner.prepare_case(case, tmp_path, size_divisor=16)
+
+    assert [value.shape for value in inputs] == [
+        (8, 8, 8, 8, 8),
+        (8, 8, 16, 16, 16),
+    ]
+
+
 def test_make_input_supports_integer_zero_fixture():
     value = runner.make_input((8,), "0", "int64")
 
