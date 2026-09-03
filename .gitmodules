@@ -4,4 +4,4 @@
 [submodule "MimIR"]
 	path = MimIR
 	url = https://github.com/hsqStephenZhang/MimIR.git
-	branch = feat/torch-plugin
+branch = feat/torch-plugin-new

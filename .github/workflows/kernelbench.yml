@@ -100,7 +100,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: MimIR/build
-          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-cxx23-v3-7e0a2bec29
+          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-cxx23-v4-bc4865c446
 
       - name: Build MimIR and install frontend
         shell: bash

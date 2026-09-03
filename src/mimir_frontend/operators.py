@@ -78,7 +78,7 @@ class OperatorLibrary:
         # Complex
         self.f32_sigmoid_axm = bind_math_axm(math.slf)
         self.f32_rsqrt_axm = bind_math_axm(math.rrt)
-        self.affine_index = world.annex(affine.index.value)
+        self.affine_index = world.annex(affine.Idx.value)
 
         # Bitwise/Logical
         s_bool = self._lit_nat(2)
@@ -1460,7 +1460,18 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, [])
 
-        callee = self.world.annex(torch_dialect.reduction.vector_norm.value)
+        # The generic vector_norm schema returns a dependent selection on
+        # `keepdim`.  Prefer the statically typed p=2 schemas whenever the
+        # frontend has concrete API arguments; this lets MimIR PE retain the
+        # exact tensor shape instead of checking a dynamic union result.
+        if p == 2 and isinstance(keepdim, bool):
+            member = (
+                torch_dialect.reduction.norm2_dims_keepdim
+                if keepdim else torch_dialect.reduction.norm2_dims
+            )
+        else:
+            member = torch_dialect.reduction.vector_norm
+        callee = self.world.annex(member.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(
             callee,
@@ -1470,11 +1481,17 @@ class OperatorLibrary:
                 self.world.tuple(physical_dims),
             ],
         )
-        callee = self.world.app(callee, self.world.tuple([
-            self.world.tuple([self.world.lit_i64(axis) for axis in reduced_axes]),
-            self.world.lit_bool(keepdim),
-            self._float_lit(self._tensor_element_type(input), p),
-        ]))
+        dimensions = self.world.tuple(
+            [self.world.lit_i64(axis) for axis in reduced_axes]
+        )
+        if member is torch_dialect.reduction.vector_norm:
+            callee = self.world.app(callee, self.world.tuple([
+                dimensions,
+                self.world.lit_bool(keepdim),
+                self._float_lit(self._tensor_element_type(input), p),
+            ]))
+        else:
+            callee = self.world.app(callee, dimensions)
         result = self.world.app(callee, input)
         return self._remember_shape(result, output_dims)
 
@@ -2202,8 +2219,6 @@ class OperatorLibrary:
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
         shape = self.world.tuple(physical_dims)
-        member = "sum_typed" if kind == "sum" else kind
-        callee = self.world.annex(self._torch_annex_id(f"reduction.{member}"))
         if kind == "sum":
             dictionary = self.world.app(
                 self.world.app(
@@ -2216,6 +2231,40 @@ class OperatorLibrary:
             dictionary = self._torch_semantics(
                 input, floating=kind in ("amax", "mean", "logsumexp")
             )
+        # These schemas expose one concrete dependent result type.  Choosing
+        # them here is important after the compiler's stricter type checking:
+        # a literal keepdim must be PE'd before the tensor is consumed.
+        static_member = None
+        if kind == "mean" and isinstance(keepdim, bool):
+            static_member = "mean_dims_keepdim" if keepdim else "mean_dims"
+        elif (
+            kind == "sum"
+            and result_type == self._tensor_element_type(input)
+            and result_type in (self.F32, self.F64)
+        ):
+            static_member = "sum_dims_keepdim" if keepdim else "sum_dims"
+        elif kind == "logsumexp" and isinstance(keepdim, bool):
+            static_member = (
+                "logsumexp_dims_keepdim" if keepdim else "logsumexp_dims"
+            )
+        if static_member is not None:
+            callee = self.world.annex(
+                self._torch_annex_id(f"reduction.{static_member}")
+            )
+            # The same-dtype schemas consume the arithmetic typeclass.  The
+            # reduction dictionary is only needed for dtype-changing sum.
+            if kind == "sum":
+                dictionary = self._torch_semantics(input)
+            elif kind == "logsumexp":
+                dictionary = self._torch_semantics(input, floating=True)
+            callee = self.world.app(callee, dictionary)
+            callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
+            result = self.world.app(callee, dim_tuple)
+            result = self.world.app(result, input)
+            return self._remember_shape(result, output_dims)
+
+        member = "sum_typed" if kind == "sum" else kind
+        callee = self.world.annex(self._torch_annex_id(f"reduction.{member}"))
         callee = self.world.app(callee, dictionary)
         callee = self._apply_grouped(callee, [self._lit_nat(rank), nr, shape])
         callee = self.world.app(

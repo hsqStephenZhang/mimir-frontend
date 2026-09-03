@@ -171,15 +171,21 @@ def test_mish_maps_directly_to_torch_semantics():
     assert "%torch.activation.mish" in def_to_string(result)
 
 
-@pytest.mark.parametrize("keepdim", [False, True])
-def test_logsumexp_maps_directly_to_torch_semantics(keepdim):
+@pytest.mark.parametrize(
+    "keepdim,expected_op",
+    [
+        (False, "%torch.reduction.logsumexp_dims"),
+        (True, "%torch.reduction.logsumexp_dims_keepdim"),
+    ],
+)
+def test_logsumexp_maps_directly_to_torch_semantics(keepdim, expected_op):
     class Model(torch.nn.Module):
         def forward(self, x):
             return torch.logsumexp(x, dim=1, keepdim=keepdim)
 
     world = make_world()
     result = translate_model(Model(), make_inputs(world, 1, "static", 3))
-    assert "%torch.reduction.logsumexp" in def_to_string(result)
+    assert expected_op in def_to_string(result)
 
 
 def test_cross_entropy_maps_directly_to_torch_semantics():
@@ -2554,10 +2560,10 @@ def test_lenet_style_cnn_with_pooling_translates():
     "dim,keepdim,expected_shape,expected_op",
     [
         (None, False, [], "%torch.reduction.sum_typed_all"),
-        (0, False, [3, 4], "%torch.reduction.sum_typed"),
-        (1, True, [2, 1, 4], "%torch.reduction.sum_typed"),
-        ((1, 2), False, [2], "%torch.reduction.sum_typed"),
-        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum_typed"),
+        (0, False, [3, 4], "%torch.reduction.sum_dims"),
+        (1, True, [2, 1, 4], "%torch.reduction.sum_dims_keepdim"),
+        ((1, 2), False, [2], "%torch.reduction.sum_dims"),
+        ((1, 2), True, [2, 1, 1], "%torch.reduction.sum_dims_keepdim"),
     ],
 )
 def test_sum_reduce_static_3d_shapes(dim, keepdim, expected_shape, expected_op):
