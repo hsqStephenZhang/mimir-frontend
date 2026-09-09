@@ -108,7 +108,7 @@ jobs:
           ./scripts/bootstrap_mimir.sh
           uv pip install einops pyyaml
 
-      - name: Run ${{ matrix.level }}
+      - name: Run ${{ matrix.level }} size16
         shell: bash
         run: |
           uv run --no-sync python scripts/run_kernelbench_mimir.py \
@@ -120,12 +120,28 @@ jobs:
             --max-fp-iters 512 \
             --allow-invalid \
             --min-pass-rate ${{ matrix.min_pass_rate }} \
-            --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}.json
+            --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}-size16.json
+
+      - name: Run level3 size1 maintained fixtures
+        if: matrix.level == 'level3'
+        shell: bash
+        run: |
+          uv run --no-sync python scripts/run_kernelbench_mimir.py \
+            --lighthouse lighthouse \
+            --suite level3 \
+            --size-divisor 1 \
+            --fixture-only \
+            --exclude-case level3/2_ShallowWideMLP.py \
+            --timeout 300 \
+            --max-memory-gb "${CASE_MEMORY_GB}" \
+            --max-fp-iters 512 \
+            --min-pass-rate 1.00 \
+            --results-json kernelbench-${{ matrix.platform }}-level3-size1.json
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernelbench-${{ matrix.platform }}-${{ matrix.level }}
-          path: kernelbench-${{ matrix.platform }}-${{ matrix.level }}.json
+          path: kernelbench-${{ matrix.platform }}-${{ matrix.level }}-*.json
           if-no-files-found: warn

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import importlib.util
 import json
 from pathlib import Path
@@ -49,6 +49,7 @@ class CaseResult:
     phase: str
     elapsed_seconds: float
     detail: str = ""
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,22 @@ def discover_cases(
     return cases
 
 
+def filter_cases(
+    cases: list[dict[str, Any]],
+    *,
+    fixture_only: bool = False,
+    excluded_cases: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Apply explicit suite filters before the parent spawns case workers."""
+    excluded = set(excluded_cases or ())
+    return [
+        case
+        for case in cases
+        if (not fixture_only or case.get("fixture") == "yaml")
+        and case["kernel"] not in excluded
+    ]
+
+
 def assert_close(actual: Any, expected: Any) -> None:
     actuals = actual if isinstance(actual, (tuple, list)) else (actual,)
     expecteds = expected if isinstance(expected, (tuple, list)) else (expected,)
@@ -231,6 +248,15 @@ def assert_close(actual: Any, expected: Any) -> None:
         )
     for got, want in zip(actuals, expecteds, strict=True):
         torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
+
+
+def timed_call(timings: dict[str, float], phase: str, function: Any) -> Any:
+    """Run one phase and record its wall-clock duration even on failure."""
+    started = time.perf_counter()
+    try:
+        return function()
+    finally:
+        timings[phase] = time.perf_counter() - started
 
 
 def prepare_case(
@@ -283,12 +309,24 @@ def prepare_case(
 
 
 def run_case(
-    case: dict[str, Any], lighthouse: Path, size_divisor: int, max_fp_iters: int | None
+    case: dict[str, Any],
+    lighthouse: Path,
+    size_divisor: int,
+    max_fp_iters: int | None,
+    timings: dict[str, float],
 ) -> None:
-    model, inputs = prepare_case(case, lighthouse, size_divisor)
+    model, inputs = timed_call(
+        timings,
+        "prepare",
+        lambda: prepare_case(case, lighthouse, size_divisor),
+    )
     with torch.no_grad():
         try:
-            expected = model(*inputs)
+            expected = timed_call(
+                timings,
+                "eager",
+                lambda: model(*inputs),
+            )
         except Exception as exc:
             raise InvalidCaseError(f"eager fixture failed: {exc}") from exc
         try:
@@ -298,18 +336,40 @@ def run_case(
             # can preserve this logging side effect by treating warnings.warn
             # as reorderable, instead of breaking the graph before the backend.
             torch._dynamo.config.reorderable_logging_functions.add(warnings.warn)
-            compiled = torch.compile(
-                model,
-                backend=mimir_backend,
-                fullgraph=True,
-                dynamic=False,
-                options=options,
+            compiled = timed_call(
+                timings,
+                "compile_setup",
+                lambda: torch.compile(
+                    model,
+                    backend=mimir_backend,
+                    fullgraph=True,
+                    dynamic=False,
+                    options=options,
+                ),
             )
-            actual = compiled(*inputs)
+            # torch.compile is lazy: MimIR lowering and JIT happen here, on the
+            # first call, together with that call's execution.
+            actual = timed_call(
+                timings,
+                "compile_execute",
+                lambda: compiled(*inputs),
+            )
         except Exception as exc:
             raise PhaseError("compile_execute", exc) from exc
         try:
-            assert_close(actual, expected)
+            timed_call(
+                timings,
+                "cached_execute",
+                lambda: compiled(*inputs),
+            )
+        except Exception as exc:
+            raise PhaseError("cached_execute", exc) from exc
+        try:
+            timed_call(
+                timings,
+                "compare",
+                lambda: assert_close(actual, expected),
+            )
         except Exception as exc:
             raise PhaseError("compare", exc) from exc
 
@@ -318,8 +378,9 @@ def execute_direct(
     case: dict[str, Any], lighthouse: Path, size_divisor: int, max_fp_iters: int | None
 ) -> CaseResult:
     started = time.monotonic()
+    timings: dict[str, float] = {}
     try:
-        run_case(case, lighthouse, size_divisor, max_fp_iters)
+        run_case(case, lighthouse, size_divisor, max_fp_iters, timings)
     except InvalidCaseError as exc:
         return CaseResult(
             case["kernel"],
@@ -327,6 +388,7 @@ def execute_direct(
             "fixture",
             time.monotonic() - started,
             str(exc),
+            timings,
         )
     except PhaseError as exc:
         return CaseResult(
@@ -335,6 +397,7 @@ def execute_direct(
             exc.phase,
             time.monotonic() - started,
             str(exc),
+            timings,
         )
     except Exception as exc:
         return CaseResult(
@@ -343,8 +406,15 @@ def execute_direct(
             "unknown",
             time.monotonic() - started,
             str(exc),
+            timings,
         )
-    return CaseResult(case["kernel"], "PASS", "compare", time.monotonic() - started)
+    return CaseResult(
+        case["kernel"],
+        "PASS",
+        "compare",
+        time.monotonic() - started,
+        timings=timings,
+    )
 
 
 def write_results(path: Path, results: list[CaseResult]) -> None:
@@ -377,6 +447,18 @@ def main() -> int:
         ),
     )
     parser.add_argument("--kernel", help="only run cases whose path contains this text")
+    parser.add_argument(
+        "--fixture-only",
+        action="store_true",
+        help="run only cases backed by a maintained YAML fixture",
+    )
+    parser.add_argument(
+        "--exclude-case",
+        action="append",
+        default=[],
+        metavar="KERNEL",
+        help="exclude an exact kernel path; may be repeated",
+    )
     parser.add_argument("--case", help=argparse.SUPPRESS)
     parser.add_argument("--direct", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -438,6 +520,11 @@ def main() -> int:
             else (args.suite,)
         )
         cases = discover_cases(args.lighthouse, levels, args.fixtures)
+    cases = filter_cases(
+        cases,
+        fixture_only=args.fixture_only,
+        excluded_cases=args.exclude_case,
+    )
     if args.kernel:
         cases = [case for case in cases if args.kernel in case["kernel"]]
     if args.case:
@@ -485,6 +572,10 @@ def main() -> int:
                 "--max-fp-iters", str(args.max_fp_iters), "--direct",
                 "--max-memory-gb", str(args.max_memory_gb),
             ]
+            if args.fixture_only:
+                command.append("--fixture-only")
+            for excluded_case in args.exclude_case:
+                command.extend(["--exclude-case", excluded_case])
             try:
                 child = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
                 marker = next(

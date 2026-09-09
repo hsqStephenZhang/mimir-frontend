@@ -70,6 +70,22 @@ def test_discover_cases_merges_local_fixture_overlays(tmp_path: Path):
     assert cases[0]["scaled_input_shapes"] == ["8x4"]
 
 
+def test_filter_cases_selects_fixtures_and_exact_exclusions():
+    cases = [
+        {"kernel": "level3/1_A.py", "fixture": "yaml"},
+        {"kernel": "level3/2_B.py", "fixture": "yaml"},
+        {"kernel": "level3/3_C.py", "fixture": "native"},
+    ]
+
+    selected = runner.filter_cases(
+        cases,
+        fixture_only=True,
+        excluded_cases=["level3/2_B.py"],
+    )
+
+    assert [case["kernel"] for case in selected] == ["level3/1_A.py"]
+
+
 def test_native_fixture_requires_unscaled_execution(tmp_path: Path):
     case = {"kernel": "level3/1_A.py", "fixture": "native"}
     model = tmp_path / "third_party/KernelBench/KernelBench/level3/1_A.py"
@@ -145,6 +161,23 @@ def test_make_input_supports_integer_zero_fixture():
 
     assert value.dtype == torch.int64
     assert torch.equal(value, torch.zeros(8, dtype=torch.int64))
+
+
+def test_timed_call_records_duration_on_success_and_failure(monkeypatch):
+    values = iter([10.0, 10.25, 20.0, 20.5])
+    monkeypatch.setattr(runner.time, "perf_counter", lambda: next(values))
+    timings = {}
+
+    assert runner.timed_call(timings, "success", lambda: 7) == 7
+
+    with pytest.raises(RuntimeError, match="phase failure"):
+        runner.timed_call(
+            timings,
+            "failure",
+            lambda: (_ for _ in ()).throw(RuntimeError("phase failure")),
+        )
+
+    assert timings == {"success": 0.25, "failure": 0.5}
 
 
 def test_prepare_case_applies_per_input_dtypes(tmp_path: Path):
