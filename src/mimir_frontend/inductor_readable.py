@@ -151,7 +151,7 @@ def translate_inductor_readable(case_or_path: str | Path, root: Path = DEFAULT_I
         return translator.translate(graph_module.graph, inputs)
 
     num_params = len(inputs) + 1
-    dom_with_ret = world.mut_sigma(num_params)
+    dom_with_ret = world.mut_sigma(world.type(world.lit_univ(0)), num_params)
     for i, inp in enumerate(inputs):
         dom_with_ret.set(i, inp.type())
         

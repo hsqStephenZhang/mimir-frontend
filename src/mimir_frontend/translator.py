@@ -1999,7 +1999,7 @@ class FXGraphTranslator:
 
         old_sym_map = self.ops.sym_map
         num_params = len(input_types) + 1
-        dom_with_ret = self.world.mut_sigma(num_params)
+        dom_with_ret = self.world.mut_sigma(self.world.type(self.world.lit_univ(0)), num_params)
 
         for i in range(num_sym):
             dom_with_ret.set(i, self.world.type_nat())

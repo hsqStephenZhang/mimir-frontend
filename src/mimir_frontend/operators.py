@@ -42,9 +42,9 @@ class OperatorLibrary:
 
         def bind_math_axm(axm_enum):
             axm = world.annex(axm_enum.value)
-            # %_math_arith.add {pe} mode
-            axm = world.app(axm, self.f32_config)
-            return world.app(axm, self.mode0)
+            # math.arith.add takes its mode first: `Nat -> {pe} -> ...`
+            axm = world.app(axm, self.mode0)
+            return world.app(axm, self.f32_config)
 
         # Arithmetic
         self.f32_add_axm = bind_math_axm(_math_arith.add)
@@ -78,7 +78,7 @@ class OperatorLibrary:
         # Complex
         self.f32_sigmoid_axm = bind_math_axm(math.slf)
         self.f32_rsqrt_axm = bind_math_axm(math.rrt)
-        self.affine_index = world.annex(affine.Idx.value)
+        self.affine_index = world.annex(affine.Index.value)
 
         # Bitwise/Logical
         s_bool = self._lit_nat(2)
@@ -864,7 +864,7 @@ class OperatorLibrary:
             lam = self.world.mut_lam(self.I64, self.F32)
             value = lam.var()
             callee = self.world.annex(_math_conv.s2f.value)
-            callee = self.world.implicit_app(callee, self.f32_config)
+            callee = self.world.implicit_app(callee, [self.f32_config])
             lam.set_body(True, self.world.app(callee, value))
             return self.unary(lam, x, out_type=self.F32)
 
@@ -1817,8 +1817,7 @@ class OperatorLibrary:
             if not self.rules.same_shape(value_dims, normalized_dims):
                 raise ValueError("LayerNorm weight and bias must match normalized_shape")
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         callee = self.world.annex(torch_dialect.normalization.native_layer_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -1852,8 +1851,7 @@ class OperatorLibrary:
                     self.world.annex(option.none.value), channel_type
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         callee = self.world.annex(torch_dialect.normalization.group_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -1884,8 +1882,7 @@ class OperatorLibrary:
                     self.world.annex(option.none.value), channel_type
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         def nat(value):
             if isinstance(value, mim.Def):
@@ -2003,7 +2000,7 @@ class OperatorLibrary:
         optional_weight = (
             self.world.app(self.world.annex(option.none.value), channel_type)
             if weight is None else
-            self.world.implicit_app(self.world.annex(option.some.value), weight)
+            self.world.implicit_app(self.world.annex(option.some.value), [weight])
         )
         floating = self._torch_semantics(input, floating=True)
         target_constructor = (
@@ -2625,14 +2622,14 @@ class OperatorLibrary:
             bias_t = self.world.arr(out_features, elem_t)
             optional_bias = self.world.app(self.world.annex(option.none.value), bias_t)
         else:
-            optional_bias = self.world.implicit_app(self.world.annex(option.some.value), bias)
+            optional_bias = self.world.implicit_app(self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, optional_bias)
         output_dims = batch_dims + [out_features]
         return self._remember_shape(result, output_dims)
 
     def _optional_recurrent_bias(self, bias, size, elem_t):
         if bias is not None:
-            return self.world.implicit_app(self.world.annex(option.some.value), bias)
+            return self.world.implicit_app(self.world.annex(option.some.value), [bias])
         bias_t = self.world.arr(size, elem_t)
         return self.world.app(self.world.annex(option.none.value), bias_t)
 
@@ -2869,8 +2866,7 @@ class OperatorLibrary:
                     self.world.annex(option.none.value), channel_type
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         result = self.world.app(
             callee,
@@ -2898,8 +2894,7 @@ class OperatorLibrary:
                     self.world.annex(option.none.value), channel_type
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         callee = self.world.annex(torch_dialect.normalization.batch_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -2950,8 +2945,7 @@ class OperatorLibrary:
                     "native_batch_norm affine parameters must have shape [channels]"
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         callee = self.world.annex(
             torch_dialect.normalization.native_batch_norm.value
@@ -2997,8 +2991,7 @@ class OperatorLibrary:
                     self.world.annex(option.none.value), channel_type
                 )
             return self.world.implicit_app(
-                self.world.annex(option.some.value), value
-            )
+                self.world.annex(option.some.value), [value])
 
         for name, value in (("running_mean", running_mean),
                             ("running_var", running_var)):
@@ -3158,8 +3151,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3232,8 +3224,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3296,8 +3287,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3368,8 +3358,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3425,8 +3414,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3470,8 +3458,7 @@ class OperatorLibrary:
             )
         else:
             optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), bias
-            )
+                self.world.annex(option.some.value), [bias])
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3752,8 +3739,7 @@ class OperatorLibrary:
         else:
             divisor = self._to_nat(divisor_override)
             optional_divisor = self.world.implicit_app(
-                self.world.annex(option.some.value), divisor
-            )
+                self.world.annex(option.some.value), [divisor])
         callee = self._apply_grouped(
             callee,
             [
@@ -3828,8 +3814,7 @@ class OperatorLibrary:
             )
         else:
             optional_divisor = self.world.implicit_app(
-                self.world.annex(option.some.value), self._to_nat(divisor_override)
-            )
+                self.world.annex(option.some.value), [self._to_nat(divisor_override)])
         params = [
             self.world.tuple([self._to_nat(v) for v in values])
             for values in (kernel, stride, padding)
