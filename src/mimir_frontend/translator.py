@@ -3,6 +3,7 @@ from torch import fx
 import mim
 from .operators import OperatorLibrary
 from mim._plugins.compile import compile as mim_compile
+from mim._plugins.tensor import tensor as _tensor_dialect
 import operator
 from collections.abc import Callable
 
@@ -2025,7 +2026,13 @@ class FXGraphTranslator:
             for sym_name, sym_param in zip(sym_names, lam_sym_params):
                 self.ops.sym_map[sym_name] = sym_param
 
-        actual_inputs = [lam.var().proj(num_params, i) for i in range(num_sym, num_sym + num_inputs)]
+        # lower_to_mem needs boundary tensors annotated, or scalarize splits them into parts.
+        tensor_buf = self.world.annex(_tensor_dialect.buf.value)
+        def _as_buf(v):
+            return self.world.app(self.world.app(tensor_buf, v.type()), v) \
+                if v.type().node_name() == "Arr" else v
+        actual_inputs = [_as_buf(lam.var().proj(num_params, i))
+                         for i in range(num_sym, num_sym + num_inputs)]
         if hasattr(self, "input_shapes"):
             for input_index, (actual_input, shape) in enumerate(
                 zip(actual_inputs[:len(placeholders)], self.input_shapes)

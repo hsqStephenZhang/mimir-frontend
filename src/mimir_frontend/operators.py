@@ -1081,13 +1081,7 @@ class OperatorLibrary:
             if input.type() == elem_type:
                 scalar = input
             else:
-                getter = self.world.annex(tensor.get.value)
-                getter = self._apply_grouped(
-                    getter, [elem_type, self._lit_nat(0), self.world.tuple([])]
-                )
-                scalar = self.world.app(
-                    getter, self.world.tuple([self.world.tuple([]), input])
-                )
+                scalar = self.world.extract(input, self.world.tuple([]))
             callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(callee, [elem_type, out_rank])
             result = self.world.app(callee, [out_shape_tuple, scalar])
