@@ -29,6 +29,6 @@ lam.externalize()
 
 with open("tests/draft_cps.mim", "w") as f:
     # dump might not return string directly or maybe it does, let's just write to file via write
-    lam.write(100, "tests/draft_cps.mim")
+    lam.write(mim.Dump.All, "tests/draft_cps.mim")
 
 print("CPS module generated successfully.")

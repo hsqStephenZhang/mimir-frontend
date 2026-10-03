@@ -60,7 +60,7 @@ def translate_model(model, inputs):
 def def_to_string(defn):
     with tempfile.TemporaryDirectory() as tmp_dir:
         path = Path(tmp_dir) / "def.mim"
-        defn.write(100, str(path))
+        defn.write(mim.Dump.Scope, str(path))
         return path.read_text()
 
 
@@ -87,16 +87,20 @@ def tensor_element_type(tensor_def):
     return tensor_type
 
 
+def seq_axes(seq):
+    """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
+    shape = seq.shape()
+    return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
 
 
 def tensor_shape(tensor_def: mim.Def):
     dims = []
     tensor_type = tensor_def.type()
     while isinstance(tensor_type, mim.Seq):
-        arity = tensor_type.arity()
-        if isinstance(arity, mim.Tuple) and arity.num_projs() == 0:
+        axes = seq_axes(tensor_type)
+        if not axes:
             break
-        dims.append(arity)
+        dims.extend(axes)
         tensor_type = tensor_type.body()
     return dims
 

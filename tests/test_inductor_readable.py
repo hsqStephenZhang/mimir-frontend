@@ -12,6 +12,10 @@ def make_graph_module(source: str) -> fx.GraphModule:
     return fx.symbolic_trace(namespace["GraphModule"]())
 
 
+def seq_axes(seq):
+    """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
+    shape = seq.shape()
+    return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
 
 
 def tensor_shape_values(tensor_def):
@@ -22,7 +26,7 @@ def tensor_shape_defs(tensor_def):
     dims = []
     tensor_type = tensor_def.type()
     while isinstance(tensor_type, mim.Seq):
-        dims.append(tensor_type.arity())
+        dims.extend(seq_axes(tensor_type))
         tensor_type = tensor_type.body()
     return dims
 
