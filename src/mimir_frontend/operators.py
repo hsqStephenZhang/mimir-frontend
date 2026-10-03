@@ -186,6 +186,9 @@ class OperatorLibrary:
             pass
         return value
 
+    def _set_lam(self, lam, body):
+        """Lam.set_body no longer takes the filter; set both ops at once."""
+        return lam.set([self.world.lit_tt(), body])
 
     def _seq_axes(self, seq):
         """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
@@ -220,7 +223,7 @@ class OperatorLibrary:
         out_type = self.world.arr(self._lit_nat(output_rank), self.affine_index)
         lam = self.world.mut_lam(vec_type, out_type)
         iters = lam.var()
-        lam.set_body(True, self.world.tuple([iters.proj(total_rank, index) for index in projections]))
+        self._set_lam(lam, self.world.tuple([iters.proj(total_rank, index) for index in projections]))
         return lam
 
     def _f32_reduce_lambda(self, op):
@@ -235,7 +238,7 @@ class OperatorLibrary:
         args_type = self.world.arr(self._lit_nat(2), arg_type)
         lam = self.world.mut_lam(args_type, ret_type)
         args = lam.var()
-        lam.set_body(True, self.world.app(op, [args.proj(2, 0), args.proj(2, 1)]))
+        self._set_lam(lam, self.world.app(op, [args.proj(2, 0), args.proj(2, 1)]))
         return lam
 
     def _tensor_element_type(self, tensor_def):
@@ -574,7 +577,7 @@ class OperatorLibrary:
     def _f32_pair_to_mean_lambda(self, pair_type):
         lam = self.world.mut_lam(pair_type, self.F32)
         pair = lam.var()
-        lam.set_body(True, self.world.app(self.f32_div_axm, [pair.proj(2, 0), pair.proj(2, 1)]))
+        self._set_lam(lam, self.world.app(self.f32_div_axm, [pair.proj(2, 0), pair.proj(2, 1)]))
         return lam
 
     # Arithmetic
@@ -863,7 +866,7 @@ class OperatorLibrary:
             callee = self.world.annex(core.select.value)
             callee = self.world.app(callee, self.F32)
             res = self._apply_grouped(callee, [v, self._f32_float_lit(1.0), self._f32_float_lit(0.0)])
-            lam.set_body(True, res)
+            self._set_lam(lam, res)
             return self.unary(lam, x, out_type=self.F32)
 
         if in_type == self.I64 and out_type == self.F32:
@@ -871,7 +874,7 @@ class OperatorLibrary:
             value = lam.var()
             callee = self.world.annex(_math_conv.s2f.value)
             callee = self.world.implicit_app(callee, [self.f32_config])
-            lam.set_body(True, self.world.app(callee, value))
+            self._set_lam(lam, self.world.app(callee, value))
             return self.unary(lam, x, out_type=self.F32)
 
         if in_type == self.Bool and out_type == self.I64:
@@ -1126,7 +1129,7 @@ class OperatorLibrary:
             callee = self.world.annex(tensor.map.value)
             callee = self._apply_grouped(callee, [elem_type, self._lit_nat(0), self.world.tuple([])])
             lam = self.world.mut_lam(self.world.sigma([]), elem_type)
-            lam.set_body(True, input)
+            self._set_lam(lam, input)
             callee = self.world.app(callee, lam)
             callee = self.world.app(callee, self.world.tuple([out_rank, out_shape_tuple]))
             result = self.world.app(callee, self.world.tuple([]))
@@ -1189,7 +1192,7 @@ class OperatorLibrary:
         callee = self.world.app(callee, self.world.tuple([elem_type, ni, Is]))
         
         lam = self.world.mut_lam(self.world.sigma([]), elem_type)
-        lam.set_body(True, scalar_def)
+        self._set_lam(lam, scalar_def)
         
         callee = self.world.app(callee, lam)
         callee = self.world.app(callee, self.world.tuple([out_rank, out_shape_tuple]))
@@ -2360,9 +2363,9 @@ class OperatorLibrary:
             mean_sq = self.world.app(self.f32_mul_axm, [mean, mean])
             e_x_sq = self.world.app(self.f32_div_axm, [s_sq, c])
             var = self.world.app(self.f32_sub_axm, [e_x_sq, mean_sq])
-            lam.set_body(True, var)
+            self._set_lam(lam, var)
         else:
-            lam.set_body(True, mean)
+            self._set_lam(lam, mean)
             
         return lam
 
@@ -4124,7 +4127,7 @@ class OperatorLibrary:
                 callee = self.world.app(
                     callee,
                     self.world.tuple(
-                        [self.world.lit_i64(scan_dim), self.world.lit_tt()]
+                        [_lit_i64(self.world, scan_dim), self.world.lit_tt()]
                     ),
                 )
             else:
