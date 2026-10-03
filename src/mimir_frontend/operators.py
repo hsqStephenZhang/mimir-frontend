@@ -4561,6 +4561,14 @@ class OperatorLibrary:
         out_dims = in_dims[:start_dim] + [self._nat_product(in_dims[start_dim : end_dim + 1])] + in_dims[end_dim + 1 :]
         return self.reshape(x, out_dims)
 
+    def _canonical_index(self, extent, index):
+        if not isinstance(index, int) or index >= 0:
+            return index
+        extent_val = self.rules._dim_literal_value(extent)
+        if extent_val is None:
+            raise NotImplementedError("negative index into a dynamic dimension is not supported")
+        return max(0, index + extent_val)
+
     def slice(self, x, dim, start, end, step=1):
         """
         Translates to `%tensor.slice`.
@@ -4569,7 +4577,10 @@ class OperatorLibrary:
         rank_val = len(in_dims)
 
         if dim < 0: dim += rank_val
-        
+
+        start = self._canonical_index(in_dims[dim], start)
+        end = self._canonical_index(in_dims[dim], end)
+
         # 1. Canonical shape transformation
         out_dims = self.rules.slice_shape(in_dims, dim, start, end, step)
         
@@ -4886,10 +4897,12 @@ class OperatorLibrary:
         """
         Translates to `slice` followed by `squeeze`.
         """
-        # slice(index, index + 1) then squeeze(dim)
+        in_dims = self.shape_of(x)
+        if dim < 0: dim += len(in_dims)
+        index = self._canonical_index(in_dims[dim], index)
         sliced = self.slice(x, dim, index, index + 1, 1)
         result = self.squeeze(sliced, dim)
-        return self._remember_shape(result, self.rules.select_shape(self.shape_of(x), dim))
+        return self._remember_shape(result, self.rules.select_shape(in_dims, dim))
 
     def clone(self, x):
         """Translate `aten.clone` to its materializing Torch semantics."""
