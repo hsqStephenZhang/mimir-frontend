@@ -186,14 +186,20 @@ class OperatorLibrary:
             pass
         return value
 
+
+    def _seq_axes(self, seq):
+        """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
+        shape = seq.shape()
+        return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
+
     def _shape_dims(self, tensor_def):
         dims = []
         tensor_type = tensor_def.type()
         while isinstance(tensor_type, mim.Seq):
-            arity = tensor_type.arity()
-            if isinstance(arity, mim.Tuple) and arity.num_projs() == 0:
+            axes = self._seq_axes(tensor_type)
+            if not axes:
                 break
-            dims.append(arity)
+            dims.extend(axes)
             tensor_type = tensor_type.body()
         return dims
 
@@ -1476,7 +1482,7 @@ class OperatorLibrary:
             ],
         )
         dimensions = self.world.tuple(
-            [self.world.lit_i64(axis) for axis in reduced_axes]
+            [_lit_i64(self.world, axis) for axis in reduced_axes]
         )
         if member is torch_dialect.reduction.vector_norm:
             callee = self.world.app(callee, self.world.tuple([
@@ -4151,7 +4157,7 @@ class OperatorLibrary:
         )
         callee = self._apply_grouped(callee, physical_dims)
         callee = self.world.app(
-            callee, self.world.lit_i64(physical_axes.index(logical_dim))
+            callee, _lit_i64(self.world, physical_axes.index(logical_dim))
         )
         return self._remember_shape(self.world.app(callee, input), dims)
 
@@ -4774,8 +4780,8 @@ class OperatorLibrary:
                 self.world.tuple(
                     [
                         x,
-                        self.world.lit_i64(physical_axes.index(axis0)),
-                        self.world.lit_i64(physical_axes.index(axis1)),
+                        _lit_i64(self.world, physical_axes.index(axis0)),
+                        _lit_i64(self.world, physical_axes.index(axis1)),
                     ]
                 ),
             )

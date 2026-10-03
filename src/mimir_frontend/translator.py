@@ -1959,7 +1959,7 @@ class FXGraphTranslator:
         dims = []
         elem_type = tensor_type
         while isinstance(elem_type, mim.Seq):
-            dims.append(elem_type.arity())
+            dims.extend(self.ops._seq_axes(elem_type))
             elem_type = elem_type.body()
         return dims, elem_type
 
