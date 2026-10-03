@@ -157,7 +157,7 @@ def _temporary_cwd():
 def _write_def_to_string(defn: mim.Def, name: str, max_depth: int) -> str:
     with _temporary_cwd() as tmp_dir:
         path = tmp_dir / f"{name}.mim"
-        defn.write(max_depth, str(path))
+        defn.write(mim.Dump.Scope, str(path))
         return path.read_text()
 
 
