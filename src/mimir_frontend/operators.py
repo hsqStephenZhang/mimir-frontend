@@ -14,6 +14,11 @@ from mim._plugins.core import core, _core_bit1, _core_bit2
 from .shape_rules import ShapeRules
 from . import expr
 
+def _lit_i64(world, value: int):
+    """`lit_i64` takes an unsigned payload; a negative literal is its two's complement."""
+    return world.lit_i64(int(value) & ((1 << 64) - 1))
+
+
 class OperatorLibrary:
     @staticmethod
     def _torch_annex_id(name: str) -> int:
@@ -417,7 +422,7 @@ class OperatorLibrary:
         if isinstance(scalar, mim.Def):
             scalar_def = scalar
         elif elem_type == self.I64:
-            scalar_def = self.world.lit_i64(int(scalar))
+            scalar_def = _lit_i64(self.world, int(scalar))
         else:
             scalar_def = self._float_lit(elem_type, scalar)
         operands = [input, scalar_def]
@@ -425,7 +430,7 @@ class OperatorLibrary:
             if elem_type == self.I64:
                 if not isinstance(alpha, (int, bool)):
                     raise TypeError("integer add/sub alpha must be integral")
-                alpha_def = self.world.lit_i64(int(alpha))
+                alpha_def = _lit_i64(self.world, int(alpha))
             else:
                 alpha_def = self._float_lit(elem_type, alpha)
             operands.append(alpha_def)
@@ -887,7 +892,7 @@ class OperatorLibrary:
                 True,
                 self._apply_grouped(
                     callee,
-                    [value, self.world.lit_i64(1), self.world.lit_i64(0)],
+                    [value, _lit_i64(self.world, 1), _lit_i64(self.world, 0)],
                 ),
             )
             return self.unary(lam, x, out_type=self.I64)
@@ -965,7 +970,7 @@ class OperatorLibrary:
         )
         callee = self.world.app(
             callee,
-            self.world.tuple([self.world.lit_i64(axis) for axis in dims]),
+            self.world.tuple([_lit_i64(self.world, axis) for axis in dims]),
         )
         result = self.world.app(callee, input)
         reduced_dims = self.rules.reduce_shape(input_dims, dims, False)
@@ -991,7 +996,7 @@ class OperatorLibrary:
         elif elem_type in (self.F32, self.F64):
             scalar = self._float_lit(elem_type, value)
         elif elem_type == self.I64:
-            scalar = self.world.lit_i64(int(value))
+            scalar = _lit_i64(self.world, int(value))
         elif elem_type == self.Bool:
             scalar = self.world.lit_tt() if value else self.world.lit_ff()
         else:
@@ -1166,7 +1171,7 @@ class OperatorLibrary:
             scalar_def = self.world.lit_tt() if fill_value else self.world.lit_ff()
         elif dtype in (torch.int64, torch.long):
             elem_type = self.I64
-            scalar_def = self.world.lit_i64(int(fill_value))
+            scalar_def = _lit_i64(self.world, int(fill_value))
         else:
             raise NotImplementedError(f"full with dtype {dtype} is not implemented")
 
@@ -1248,7 +1253,7 @@ class OperatorLibrary:
             scalar = self._f32_float_lit(float(value))
         elif dtype in (torch.int64, torch.long):
             elem_type = self.I64
-            scalar = self.world.lit_i64(int(value))
+            scalar = _lit_i64(self.world, int(value))
         elif dtype == torch.bool:
             elem_type = self.Bool
             scalar = self.world.lit_tt() if value else self.world.lit_ff()
@@ -1540,7 +1545,7 @@ class OperatorLibrary:
             indices = self.world.app(
                 callee,
                 self.world.tuple(
-                    [self.world.tuple(physical_dims), self.world.lit_i64(0)]
+                    [self.world.tuple(physical_dims), _lit_i64(self.world, 0)]
                 ),
             )
             result_dims = list(dims) if keepdim else reduced_dims
@@ -1564,7 +1569,7 @@ class OperatorLibrary:
             callee,
             [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
         )
-        callee = self.world.app(callee, self.world.lit_i64(physical_dim))
+        callee = self.world.app(callee, _lit_i64(self.world, physical_dim))
         result = self.world.app(callee, input)
         outputs = [result.proj(3, 1), result.proj(3, 2)]
         for output in outputs:
@@ -1626,7 +1631,7 @@ class OperatorLibrary:
         callee = self.world.app(
             callee,
             self.world.tuple(
-                [self.world.lit_i64(physical_dim), self.world.lit_ff()]
+                [_lit_i64(self.world, physical_dim), self.world.lit_ff()]
             ),
         )
         result = self.world.app(callee, input)
@@ -1694,7 +1699,7 @@ class OperatorLibrary:
         )
         callee = self.world.app(
             callee,
-            self.world.tuple([self.world.lit_i64(dim) for dim in physical_dims]),
+            self.world.tuple([_lit_i64(self.world, dim) for dim in physical_dims]),
         )
         result = self.world.app(callee, input)
         result = self._remember_shape(result, logical_shape)
@@ -1731,12 +1736,12 @@ class OperatorLibrary:
         )
         provenance_start = start
         provenance_length = length
-        start = self.world.lit_i64(start) if isinstance(start, int) else start
+        start = _lit_i64(self.world, start) if isinstance(start, int) else start
         length = self._to_nat(length)
         callee = self.world.app(
             callee,
             self.world.tuple(
-                [self.world.lit_i64(physical_dim), start, length]
+                [_lit_i64(self.world, physical_dim), start, length]
             ),
         )
         result = self.world.app(callee, input)
@@ -1766,7 +1771,7 @@ class OperatorLibrary:
                 f"{name} with element type {elem_type} is not implemented"
             )
         if isinstance(diagonal, int):
-            diagonal = self.world.lit_i64(diagonal)
+            diagonal = _lit_i64(self.world, diagonal)
 
         callee = self.world.annex(op.value)
         callee = self._apply_grouped(
@@ -2027,7 +2032,7 @@ class OperatorLibrary:
         )
         result = self.world.app(result, self.world.tuple([
             self._lit_nat(reduction_tags[reduction]),
-            self.world.lit_i64(ignore_index),
+            _lit_i64(self.world, ignore_index),
             self._float_lit(self._tensor_element_type(input), label_smoothing),
         ]))
         return self._remember_shape(result, loss_dims if reduction == "none" else [])
@@ -2214,7 +2219,7 @@ class OperatorLibrary:
             result = self.world.app(callee, input)
             return self._remember_shape(result, output_dims)
         dim_values = [
-            self.world.lit_i64(axis) for axis in physical_reduction_dims
+            _lit_i64(self.world, axis) for axis in physical_reduction_dims
         ]
         dim_tuple = self.world.tuple(dim_values)
         nr = self._lit_nat(len(dim_values))
@@ -2454,7 +2459,7 @@ class OperatorLibrary:
             )
 
         dim_values = [
-            self.world.lit_i64(axis) for axis in physical_reduction_dims
+            _lit_i64(self.world, axis) for axis in physical_reduction_dims
         ]
         callee = self.world.annex(torch_dialect.reduction.var_mean.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -3996,7 +4001,7 @@ class OperatorLibrary:
         if elem_type in (self.F32, self.F64):
             scalar = self._float_lit(elem_type, value)
         elif elem_type == self.I64:
-            scalar = self.world.lit_i64(int(value))
+            scalar = _lit_i64(self.world, int(value))
         elif elem_type == self.Bool:
             scalar = self.world.lit_bool(bool(value))
         else:
@@ -4061,7 +4066,7 @@ class OperatorLibrary:
         )
         callee = self.world.app(
             callee,
-            self.world.tuple([self._lit_nat(n), self.world.lit_i64(physical_dim)]),
+            self.world.tuple([self._lit_nat(n), _lit_i64(self.world, physical_dim)]),
         )
         result = self.world.app(callee, self.world.tuple([input, prepend]))
         return self._remember_shape(result, output_dims)
@@ -4111,7 +4116,7 @@ class OperatorLibrary:
         if boolean_input:
             callee = self.world.annex(torch_dialect.scan.cumsum_bool_i64.value)
             callee = self._apply_grouped(callee, scan_dims)
-            callee = self.world.app(callee, self.world.lit_i64(scan_dim))
+            callee = self.world.app(callee, _lit_i64(self.world, scan_dim))
         else:
             op = (
                 torch_dialect.scan.cumsum_2d_direction
@@ -4131,7 +4136,7 @@ class OperatorLibrary:
                     ),
                 )
             else:
-                callee = self.world.app(callee, self.world.lit_i64(scan_dim))
+                callee = self.world.app(callee, _lit_i64(self.world, scan_dim))
         result = self.world.app(callee, input)
         result = self._remember_shape(result, dims)
         if not reverse:
@@ -4194,7 +4199,7 @@ class OperatorLibrary:
         callee = self.world.annex(torch_dialect.scan.cumprod_2d.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
         callee = self._apply_grouped(callee, scan_dims)
-        result = self.world.app(callee, self.world.lit_i64(scan_dim))
+        result = self.world.app(callee, _lit_i64(self.world, scan_dim))
         result = self.world.app(result, input)
         return self._remember_shape(result, dims)
 
@@ -4233,7 +4238,7 @@ class OperatorLibrary:
         )
         params = self.world.tuple([
             self.world.tuple([self._lit_nat(value) for value in normalized_shifts]),
-            self.world.tuple([self.world.lit_i64(value) for value in dim_values]),
+            self.world.tuple([_lit_i64(self.world, value) for value in dim_values]),
         ])
         result = self.world.app(self.world.app(callee, params), input)
         return self._remember_shape(result, shape)
@@ -4278,7 +4283,7 @@ class OperatorLibrary:
              self.world.tuple(shape)],
         )
         params = self.world.tuple([
-            self.world.lit_i64(dimension), self._lit_nat(size), self._lit_nat(step)
+            _lit_i64(self.world, dimension), self._lit_nat(size), self._lit_nat(step)
         ])
         result = self.world.app(self.world.app(callee, params), input)
         return self._remember_shape(result, output_shape)
@@ -4289,7 +4294,7 @@ class OperatorLibrary:
         rank_val = len(input_dims)
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
-        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        dimension = dim if isinstance(dim, mim.Def) else _lit_i64(self.world, dim)
         callee = self.world.annex(torch_dialect.indexing.gather.value)
         callee = self._apply_grouped(
             callee,
@@ -4367,7 +4372,7 @@ class OperatorLibrary:
         rank_val = len(input_dims)
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(rank_val)
-        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        dimension = dim if isinstance(dim, mim.Def) else _lit_i64(self.world, dim)
         callee = self.world.annex(torch_dialect.indexing.scatter_src.value)
         callee = self._apply_grouped(
             callee,
@@ -4388,11 +4393,11 @@ class OperatorLibrary:
         index_dims = self.shape_of(index)
         elem_t = self._tensor_element_type(input)
         rank = self._lit_nat(len(input_dims))
-        dimension = dim if isinstance(dim, mim.Def) else self.world.lit_i64(dim)
+        dimension = dim if isinstance(dim, mim.Def) else _lit_i64(self.world, dim)
         if isinstance(value, mim.Def):
             scalar = value
         elif elem_t == self.I64:
-            scalar = self.world.lit_i64(int(value))
+            scalar = _lit_i64(self.world, int(value))
         else:
             scalar = self._float_lit(elem_t, value)
         callee = self.world.annex(torch_dialect.indexing.scatter_value.value)
@@ -4436,7 +4441,7 @@ class OperatorLibrary:
             callee,
             self.world.tuple(
                 [
-                    self.world.lit_i64(padding_idx),
+                    _lit_i64(self.world, padding_idx),
                     self.world.lit_bool(scale_grad_by_freq),
                     self.world.lit_bool(sparse),
                 ]
