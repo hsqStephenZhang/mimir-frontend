@@ -50,7 +50,7 @@ def test_model_to_mimir_can_build_placeholder_types_from_fake_tensor_meta():
     )
 
     first_line = ir.splitlines()[0]
-    assert "«2; «3; %math.F (23, 8)»»" in first_line
+    assert "«2, 3; math.F (23, 8)»" in first_line
 
 
 def test_model_to_mimir_requires_input_shapes_when_placeholder_meta_is_missing():
@@ -77,8 +77,8 @@ def test_model_to_mimir_can_use_default_compile_phase():
 
     assert isinstance(ir, str)
     assert len(ir) > 0
-    assert "extern _compile" in ir
-    assert "fun extern mimir_module" in ir or "lam extern mimir_module" in ir
+    assert "extern lam _compile" in ir
+    assert "extern con mimir_module" in ir or "extern lam mimir_module" in ir
 
 
 def test_model_to_mimir_rejects_unknown_compile_phase():

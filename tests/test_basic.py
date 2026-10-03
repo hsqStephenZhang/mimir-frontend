@@ -1952,7 +1952,7 @@ def test_reshape_accepts_single_variadic_extent():
         (lambda x: torch.norm(x, p="fro"), "torch.reduction.norm2_all"),
         (
             lambda x: torch.norm(x, p=2, dim=1, keepdim=True),
-            "%torch.reduction.vector_norm",
+            "torch.reduction.norm2_dims_keepdim",
         ),
     ],
 )

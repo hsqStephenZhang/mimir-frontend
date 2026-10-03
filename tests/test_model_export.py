@@ -56,5 +56,5 @@ export_name = "toy_model"
 
     out_file = tmp_path / "toy_model.mim"
     assert out_file.exists()
-    assert "fun extern toy_model" in out_file.read_text()
+    assert "extern con toy_model" in out_file.read_text()
     assert "toy_model" in result.stdout

@@ -1704,7 +1704,7 @@ def test_profile_summary_prints_report(tmp_path, capsys):
         )
         got = compiled(x)
         torch.testing.assert_close(got, model(x), rtol=1e-4, atol=1e-4)
-    assert "Phase profile (flat):" in capsys.readouterr().err
+    assert "Profile (flat):" in capsys.readouterr().err
 
 
 def test_profile_trace_writes_json(tmp_path):

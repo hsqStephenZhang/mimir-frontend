@@ -21,7 +21,7 @@ def test_mimir_module_generation():
     print("\nGenerated MimIR Module:")
     print(mimir_ir)
     
-    assert "fun extern my_module" in mimir_ir
+    assert "extern con my_module" in mimir_ir
     # Check if a Nat parameter is present
     assert "Nat" in mimir_ir
 

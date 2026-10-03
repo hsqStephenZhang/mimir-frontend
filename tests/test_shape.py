@@ -222,8 +222,7 @@ def test_split_with_static_sections_preserves_outer_symbols_and_creates_literal_
 
     result = ops.split(x, [3, 5], dim=1)
 
-    first = result.proj(2, 0)
-    second = result.proj(2, 1)
+    first, second = result
     first_dims = ops.shape_of(first)
     second_dims = ops.shape_of(second)
 
