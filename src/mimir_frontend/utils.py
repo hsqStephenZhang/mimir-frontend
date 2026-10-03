@@ -270,7 +270,7 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
             _named_phase(world, "refly.remove_dbg_repl"),
             _unload_phase(world, "refly"),
             _named_phase(world, "gpu.check_addr_spaces_repl"),
-            _named_phase(world, "ll.emit"),
+            _named_phase(world, "runtime.ll_emit"),
         ],
     )
 
