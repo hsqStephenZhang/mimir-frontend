@@ -91,8 +91,8 @@ class OperatorLibrary:
         
         def bind_bit_axm(axm_enum):
             axm = world.annex(axm_enum.value)
-            axm = world.app(axm, s_bool)
-            return world.app(axm, m_scalar)
+            axm = world.app(axm, m_scalar)
+            return world.app(axm, s_bool)
             
         self.bool_and_axm = bind_bit_axm(_core_bit2.and_)
         self.bool_not_axm = bind_bit_axm(_core_bit1.neg)
