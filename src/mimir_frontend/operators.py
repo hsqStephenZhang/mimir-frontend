@@ -3684,8 +3684,11 @@ class OperatorLibrary:
         return self._remember_shape(result, [n, c, *out_spatial])
 
     def _pool2d_dim(self, size, kernel, stride, dilation, padding, ceil_mode):
-        if not all(isinstance(value, int) for value in (size, kernel, stride, dilation, padding)):
+        statics = [v if isinstance(v, int) else self.rules._dim_literal_value(v)
+                   for v in (size, kernel, stride, dilation, padding)]
+        if any(value is None for value in statics):
             return self._conv2d_dim(size, kernel, stride, dilation, padding)
+        size, kernel, stride, dilation, padding = statics
         effective_kernel = dilation * (kernel - 1) + 1
         numerator = size + 2 * padding - effective_kernel
         if ceil_mode:
