@@ -12,14 +12,10 @@ def make_graph_module(source: str) -> fx.GraphModule:
     return fx.symbolic_trace(namespace["GraphModule"]())
 
 
+
+
 def tensor_shape_values(tensor_def):
-    dims = []
-    tensor_type = tensor_def.type()
-    while isinstance(tensor_type, mim.Seq):
-        dim = tensor_type.arity()
-        dims.append(dim.get_nat() if isinstance(dim, mim.Lit) else None)
-        tensor_type = tensor_type.body()
-    return dims
+    return [d.get_nat() if isinstance(d, mim.Lit) else None for d in tensor_shape_defs(tensor_def)]
 
 
 def tensor_shape_defs(tensor_def):
