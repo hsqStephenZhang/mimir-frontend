@@ -2562,8 +2562,10 @@ class OperatorLibrary:
 
     def matmul(self, lhs, rhs):
         """Map `aten.matmul`; rank dispatch and broadcasting live in MimIR."""
-        lhs_dims = self._physical_dims(self.shape_of(lhs))
-        rhs_dims = self._physical_dims(self.shape_of(rhs))
+        lhs_logical = self.shape_of(lhs)
+        rhs_logical = self.shape_of(rhs)
+        lhs_dims = self._physical_dims(lhs_logical)
+        rhs_dims = self._physical_dims(rhs_logical)
         callee = self.world.annex(torch_dialect.linalg.matmul.value)
         callee = self.world.app(callee, self._torch_semantics(lhs))
         callee = self._apply_grouped(
@@ -2575,7 +2577,12 @@ class OperatorLibrary:
                 self.world.tuple(rhs_dims),
             ],
         )
-        return self.world.app(callee, self.world.tuple([lhs, rhs]))
+        result = self.world.app(callee, self.world.tuple([lhs, rhs]))
+        # The logical result keeps the singleton batch axes the physical type folds away, so that a
+        # following axis-indexed op (a transpose of attention heads) still counts them.
+        return self._remember_shape(
+            result, self.rules.matmul_shape(lhs_logical, rhs_logical)
+        )
 
     def bmm(self, lhs, rhs):
         """Map `aten.bmm`, normalizing composite high-rank uses through matmul.

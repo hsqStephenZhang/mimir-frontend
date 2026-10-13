@@ -71,6 +71,16 @@ class ShapeRules:
             out_reversed.append(self.broadcast_dim(d1, d2))
         return list(reversed(out_reversed))
 
+    def matmul_shape(self, s1: list[mim.Def], s2: list[mim.Def]) -> list[mim.Def]:
+        """`torch.matmul`'s result shape: a 1-D operand is a row or column that leaves no axis behind."""
+        if len(s1) == 1 and len(s2) == 1:
+            return []
+        if len(s1) == 1:
+            return s2[:-2] + s2[-1:]
+        if len(s2) == 1:
+            return s1[:-1]
+        return self.broadcast_shape(s1[:-2], s2[:-2]) + [s1[-2], s2[-1]]
+
     def normalize_reduce_dims(self, dim, rank: int) -> list[int]:
         if dim is None:
             dims = list(range(rank))

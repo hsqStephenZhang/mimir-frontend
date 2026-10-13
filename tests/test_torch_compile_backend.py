@@ -85,6 +85,16 @@ def test_softmax_folded_singleton_axes_match_eager(dim):
     check_against_eager(SoftmaxFoldedSingleton(), torch.randn(2, 1, 4))
 
 
+def test_batch_one_matmul_transpose_matches_eager():
+    """A batch of one folds out of the physical type, but `transpose(1, 2)` still counts it."""
+
+    class HeadsToSequence(torch.nn.Module):
+        def forward(self, q):
+            return torch.matmul(q, q.transpose(2, 3)).transpose(1, 2)
+
+    check_against_eager(HeadsToSequence(), torch.randn(1, 4, 5, 4))
+
+
 class TinyTransformerBlock(torch.nn.Module):
     """A complete single-head transformer block with precomputed static width."""
 
