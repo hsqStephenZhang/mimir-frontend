@@ -203,13 +203,36 @@ def test_prepare_case_applies_per_input_dtypes(tmp_path: Path):
     assert [value.dtype for value in inputs] == [torch.float32, torch.int64]
 
 
+def require_submodule_corpus() -> None:
+    if not runner.DEFAULT_CORPUS.is_dir():
+        pytest.skip("KernelBench submodule is not checked out")
+
+
+def test_default_layout_uses_vendored_fixtures_and_submodule_corpus():
+    assert runner.lighthouse_fixture_dir(None) == runner.VENDORED_LIGHTHOUSE_FIXTURES
+    assert runner.kernelbench_corpus(None) == runner.DEFAULT_CORPUS
+    for name in ("ci", "level1", "level2", "level3"):
+        assert (runner.VENDORED_LIGHTHOUSE_FIXTURES / f"{name}.yaml").is_file()
+
+
+def test_lighthouse_layout_resolves_checkout_subdirectories(tmp_path: Path):
+    assert runner.lighthouse_fixture_dir(tmp_path) == tmp_path / "examples/KernelBench"
+    assert (
+        runner.kernelbench_corpus(tmp_path)
+        == tmp_path / "third_party/KernelBench/KernelBench"
+    )
+
+
+def test_missing_corpus_fails_with_actionable_message(tmp_path: Path):
+    with pytest.raises(SystemExit, match="not a Lighthouse checkout"):
+        runner.discover_cases(tmp_path, ("level1",), tmp_path / "overlays")
+
+
 def test_repository_discovers_all_level1_to_level3_models():
-    lighthouse = Path("/workspaces/ml-compiler/lighthouse")
-    if not lighthouse.exists():
-        return
+    require_submodule_corpus()
 
     cases = runner.discover_cases(
-        lighthouse,
+        None,
         ("level1", "level2", "level3"),
         runner.DEFAULT_FIXTURES,
     )
@@ -219,13 +242,9 @@ def test_repository_discovers_all_level1_to_level3_models():
 
 
 def test_repository_discovers_level4_models_explicitly():
-    lighthouse = Path("/workspaces/ml-compiler/lighthouse")
-    if not lighthouse.exists():
-        return
+    require_submodule_corpus()
 
-    cases = runner.discover_cases(
-        lighthouse, ("level4",), runner.DEFAULT_FIXTURES
-    )
+    cases = runner.discover_cases(None, ("level4",), runner.DEFAULT_FIXTURES)
 
     assert len(cases) == 20
     assert all(case["fixture"] == "native" for case in cases)

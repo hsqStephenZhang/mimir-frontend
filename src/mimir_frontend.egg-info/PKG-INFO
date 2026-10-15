@@ -6,3 +6,5 @@ Requires-Dist: torch
 Requires-Dist: mim
 Requires-Dist: pytest
 Requires-Dist: numpy>=2.4.6
+Requires-Dist: pyyaml
+Requires-Dist: einops

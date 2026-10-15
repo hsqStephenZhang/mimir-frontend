@@ -23,14 +23,47 @@ import yaml
 from mimir_frontend.backend import mimir_backend
 
 
-DEFAULT_LIGHTHOUSE = Path("/workspaces/ml-compiler/lighthouse")
-DEFAULT_FIXTURES = Path(__file__).resolve().parent / "kernelbench_fixtures"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_FIXTURES = REPO_ROOT / "scripts/kernelbench_fixtures"
+# Verbatim copies of Lighthouse's examples/KernelBench/*.yaml; see the README beside them.
+VENDORED_LIGHTHOUSE_FIXTURES = DEFAULT_FIXTURES / "lighthouse"
+# This repository's KernelBench submodule pins the same commit Lighthouse vendors.
+DEFAULT_CORPUS = REPO_ROOT / "KernelBench/KernelBench"
 RESULT_PREFIX = "MIMIR_KERNELBENCH_RESULT="
 DEFAULT_MAX_MEMORY_GB = 32
 
 
 class InvalidCaseError(RuntimeError):
     """The selected fixture is invalid before MimIR is invoked."""
+
+
+def lighthouse_fixture_dir(lighthouse: Path | None) -> Path:
+    """Authoritative fixture YAML directory: a Lighthouse checkout or the vendored copy."""
+    if lighthouse is None:
+        return VENDORED_LIGHTHOUSE_FIXTURES
+    return lighthouse / "examples/KernelBench"
+
+
+def kernelbench_corpus(lighthouse: Path | None) -> Path:
+    """KernelBench source tree: Lighthouse's copy or this repository's submodule."""
+    if lighthouse is None:
+        return DEFAULT_CORPUS
+    return lighthouse / "third_party/KernelBench/KernelBench"
+
+
+def require_corpus(lighthouse: Path | None) -> Path:
+    """Fail early with an actionable message instead of silently discovering zero cases."""
+    corpus = kernelbench_corpus(lighthouse)
+    if corpus.is_dir():
+        return corpus
+    if lighthouse is None:
+        hint = (
+            "the KernelBench submodule is not checked out; run "
+            "`git submodule update --init KernelBench` or pass --lighthouse"
+        )
+    else:
+        hint = f"{lighthouse} is not a Lighthouse checkout with its KernelBench submodule"
+    raise SystemExit(f"KernelBench corpus not found at {corpus}: {hint}")
 
 
 class PhaseError(RuntimeError):
@@ -194,13 +227,13 @@ def numeric_kernel_key(path: Path) -> tuple[int, str]:
 
 
 def discover_cases(
-    lighthouse: Path,
+    lighthouse: Path | None,
     levels: tuple[str, ...],
     fixtures: Path = DEFAULT_FIXTURES,
 ) -> list[dict[str, Any]]:
     """Merge maintained YAML fixtures with the authoritative source corpus."""
     yaml_cases: dict[str, dict[str, Any]] = {}
-    examples = lighthouse / "examples/KernelBench"
+    examples = lighthouse_fixture_dir(lighthouse)
     for level in levels:
         for yaml_path in (examples / f"{level}.yaml", fixtures / f"{level}.yaml"):
             if yaml_path.exists():
@@ -213,7 +246,7 @@ def discover_cases(
                         "fixture": "yaml",
                     }
 
-    corpus = lighthouse / "third_party/KernelBench/KernelBench"
+    corpus = require_corpus(lighthouse)
     cases: list[dict[str, Any]] = []
     for level in levels:
         level_dir = corpus / level
@@ -260,9 +293,9 @@ def timed_call(timings: dict[str, float], phase: str, function: Any) -> Any:
 
 
 def prepare_case(
-    case: dict[str, Any], lighthouse: Path, size_divisor: int
+    case: dict[str, Any], lighthouse: Path | None, size_divisor: int
 ) -> tuple[torch.nn.Module, list[Any]]:
-    model_path = lighthouse / "third_party/KernelBench/KernelBench" / case["kernel"]
+    model_path = kernelbench_corpus(lighthouse) / case["kernel"]
     try:
         module = load_module(model_path)
     except Exception as exc:
@@ -310,7 +343,7 @@ def prepare_case(
 
 def run_case(
     case: dict[str, Any],
-    lighthouse: Path,
+    lighthouse: Path | None,
     size_divisor: int,
     max_fp_iters: int | None,
     timings: dict[str, float],
@@ -375,7 +408,7 @@ def run_case(
 
 
 def execute_direct(
-    case: dict[str, Any], lighthouse: Path, size_divisor: int, max_fp_iters: int | None
+    case: dict[str, Any], lighthouse: Path | None, size_divisor: int, max_fp_iters: int | None
 ) -> CaseResult:
     started = time.monotonic()
     timings: dict[str, float] = {}
@@ -427,7 +460,16 @@ def write_results(path: Path, results: list[CaseResult]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lighthouse", type=Path, default=DEFAULT_LIGHTHOUSE)
+    parser.add_argument(
+        "--lighthouse",
+        type=Path,
+        default=None,
+        help=(
+            "optional libxsmm/lighthouse checkout providing the fixture YAML files and "
+            "the KernelBench corpus; by default the vendored fixture copies in "
+            "scripts/kernelbench_fixtures/lighthouse and the KernelBench submodule are used"
+        ),
+    )
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument(
         "--suite",
@@ -503,12 +545,12 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.suite == "ci":
-        yaml_path = args.lighthouse / "examples/KernelBench/ci.yaml"
+        yaml_path = lighthouse_fixture_dir(args.lighthouse) / "ci.yaml"
         cases = [{**case, "fixture": "yaml"} for case in yaml.safe_load(yaml_path.read_text())]
     elif args.suite == "registered":
         cases = []
         for level in ("level1", "level2", "level3"):
-            yaml_path = args.lighthouse / "examples/KernelBench" / f"{level}.yaml"
+            yaml_path = lighthouse_fixture_dir(args.lighthouse) / f"{level}.yaml"
             cases.extend(
                 {**case, "fixture": "yaml"}
                 for case in yaml.safe_load(yaml_path.read_text()) or []
@@ -566,12 +608,14 @@ def main() -> int:
             started = time.monotonic()
             command = [
                 sys.executable, str(Path(__file__).resolve()),
-                "--lighthouse", str(args.lighthouse), "--suite", args.suite,
+                "--suite", args.suite,
                 "--fixtures", str(args.fixtures),
                 "--case", name, "--size-divisor", str(args.size_divisor),
                 "--max-fp-iters", str(args.max_fp_iters), "--direct",
                 "--max-memory-gb", str(args.max_memory_gb),
             ]
+            if args.lighthouse is not None:
+                command.extend(["--lighthouse", str(args.lighthouse)])
             if args.fixture_only:
                 command.append("--fixture-only")
             for excluded_case in args.exclude_case:

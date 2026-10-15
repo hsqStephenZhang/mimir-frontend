@@ -20,6 +20,18 @@ Then build the local MimIR Python binding and sync the Python environment:
 The script initializes recursive submodules, creates a Python 3.14 `uv` venv,
 builds MimIR's `mim_py` target, and runs `uv sync`.
 
+MimIR needs a C++23 toolchain (`<print>` must compile). On macOS use Homebrew
+LLVM rather than Apple clang, whose Command Line Tools can ship incomplete
+libc++ headers; CI does the same:
+
+```bash
+brew install llvm ninja
+export CC="$(brew --prefix llvm)/bin/clang" CXX="$(brew --prefix llvm)/bin/clang++"
+./scripts/bootstrap_mimir.sh
+```
+
+Set `CC`/`CXX` before the first configure; `MimIR/build` caches the compiler.
+
 The `mim` dependency is resolved from the local submodule build output:
 
 ```toml
@@ -98,6 +110,38 @@ time, steady-state mean/minimum time, eager-relative speed, and maximum absolute
 error. Use `--no-cache` to include a fresh MimIR compile and `--results-json`
 to retain machine-readable results. Memory and timeout limits apply per model
 and backend, so a failed large compile does not terminate the parent run.
+
+## Running KernelBench
+
+`scripts/run_kernelbench_mimir.py` compiles every KernelBench model through the
+MimIR backend and checks it against eager PyTorch. The model sources come from
+the `KernelBench` submodule (initialized by the bootstrap). The per-kernel
+fixtures (input shapes, dtypes, initializations) are vendored copies of
+Lighthouse's `examples/KernelBench/*.yaml` in
+`scripts/kernelbench_fixtures/lighthouse/`, with local overlays in
+`scripts/kernelbench_fixtures/*.yaml`. No extra checkout is needed:
+
+```bash
+uv run --no-sync python scripts/run_kernelbench_mimir.py --suite level1 \
+  --size-divisor 16 --timeout 300 --max-memory-gb 12 --max-fp-iters 512 \
+  --allow-invalid --results-json kernelbench-level1.json
+```
+
+- `--suite` selects `ci`, `level1`, `level2`, `level3`, `full` (levels 1-3),
+  or `level4` (full pretrained models). `--kernel TEXT` filters by path
+  substring; `--list` prints the selection without running it.
+- Every case runs in its own subprocess under `--timeout` seconds and a
+  `--max-memory-gb` address-space limit. Set `MIMIR_CACHE_DIR` to keep a run's
+  JIT cache separate from `~/.cache/mimir-frontend/jit`.
+- `--lighthouse PATH` reads the fixtures and corpus from a
+  [libxsmm/lighthouse](https://github.com/libxsmm/lighthouse) checkout instead
+  (CI pins `d330e762`); `--resume` skips cases already passing in the results
+  JSON.
+
+Expected coverage at `--size-divisor 16` is 100/100 on Level 1 and 99/100 on
+Level 2; the remaining Level 2 failure is documented in
+`docs/kernelbench_level2_report.md`. Level 3 and 4 details are in the
+other `docs/kernelbench_level*_report.md` files.
 
 ## Fresh Clone Smoke Test
 

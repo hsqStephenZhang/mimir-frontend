@@ -11,6 +11,8 @@ dependencies = [
     "mim",
     "pytest",
     "numpy>=2.4.6",
+    "pyyaml",
+    "einops",
 ]
 
 [tool.setuptools.packages.find]
