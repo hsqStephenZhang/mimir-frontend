@@ -123,7 +123,7 @@ Lighthouse's `examples/KernelBench/*.yaml` in
 
 ```bash
 uv run --no-sync python scripts/run_kernelbench_mimir.py --suite level1 \
-  --size-divisor 16 --timeout 300 --max-memory-gb 12 --max-fp-iters 512 \
+  --size-divisor 16 --timeout 300 --max-memory-gb 12 --max-fp-iters 8192 \
   --allow-invalid --results-json kernelbench-level1.json
 ```
 

@@ -117,7 +117,7 @@ jobs:
             --size-divisor 16 \
             --timeout 300 \
             --max-memory-gb "${CASE_MEMORY_GB}" \
-            --max-fp-iters 512 \
+            --max-fp-iters 8192 \
             --allow-invalid \
             --min-pass-rate ${{ matrix.min_pass_rate }} \
             --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}-size16.json
@@ -134,7 +134,7 @@ jobs:
             --exclude-case level3/2_ShallowWideMLP.py \
             --timeout 300 \
             --max-memory-gb "${CASE_MEMORY_GB}" \
-            --max-fp-iters 512 \
+            --max-fp-iters 8192 \
             --min-pass-rate 1.00 \
             --results-json kernelbench-${{ matrix.platform }}-level3-size1.json
 
