@@ -4,4 +4,4 @@
 [submodule "MimIR"]
 	path = MimIR
 	url = https://github.com/hsqStephenZhang/MimIR.git
-branch = feat/plugin-support-v2
+branch = frontend-dev
