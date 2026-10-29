@@ -19,27 +19,27 @@ jobs:
       matrix:
         include:
           - platform: linux
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             level: level1
             min_pass_rate: "1.00"
           - platform: linux
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             level: level2
             min_pass_rate: "0.95"
           - platform: linux
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             level: level3
             min_pass_rate: "1.00"
           - platform: macos
-            runner: macos-15
+            runner: macos-latest
             level: level1
             min_pass_rate: "1.00"
           - platform: macos
-            runner: macos-15
+            runner: macos-latest
             level: level2
             min_pass_rate: "0.95"
           - platform: macos
-            runner: macos-15
+            runner: macos-latest
             level: level3
             min_pass_rate: "1.00"
     env:
@@ -48,7 +48,7 @@ jobs:
       MIMIR_BUILD_JOBS: "3"
       MIMIR_CACHE_DIR: ${{ github.workspace }}/.ci-cache/${{ matrix.platform }}-${{ matrix.level }}
       # Standard public Linux runners have 16 GB RAM, private runners 8 GB;
-      # The macos-15 M1 runner has 7 GB. Leave room for the parent,
+      # The macos-latest M-series runner has 7 GB. Leave room for the parent,
       # compiler toolchain, and runner services around the limited case process.
       CASE_MEMORY_GB: ${{ matrix.platform == 'linux' && (github.event.repository.private && '6' || '12') || '4' }}
 
@@ -72,13 +72,14 @@ jobs:
           enable-cache: true
           python-version: "3.14"
 
+      # MimIR's C++23 range members need gcc-15's libstdc++, which ubuntu-24.04 lacks; clang serves the JIT.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14 clang ninja-build
-          echo "CC=gcc-14" >> "${GITHUB_ENV}"
-          echo "CXX=g++-14" >> "${GITHUB_ENV}"
+          sudo apt-get install -y g++-15 clang ninja-build
+          echo "CC=gcc-15" >> "${GITHUB_ENV}"
+          echo "CXX=g++-15" >> "${GITHUB_ENV}"
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
@@ -100,7 +101,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: MimIR/build
-          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-cxx23-v4-bc4865c446
+          key: mimir-${{ runner.os }}-${{ runner.arch }}-py314-cxx23-v5-${{ hashFiles('.gitmodules', 'scripts/bootstrap_mimir.sh') }}
 
       - name: Build MimIR and install frontend
         shell: bash
