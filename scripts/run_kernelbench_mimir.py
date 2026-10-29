@@ -631,7 +631,10 @@ def main() -> int:
                     None,
                 )
                 if marker is None:
-                    detail = (child.stdout + child.stderr).strip()[-4000:]
+                    # No result marker: the child died before reporting. A negative code is the signal that
+                    # killed it; a positive one usually means an allocation failed under the address-space limit.
+                    tail = (child.stdout + child.stderr).strip()[-3000:]
+                    detail = f"child exited with code {child.returncode} without a result; last output:\n{tail}"
                     result = CaseResult(
                         name,
                         "FAIL",

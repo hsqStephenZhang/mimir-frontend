@@ -51,6 +51,17 @@ jobs:
       # The macos-latest M-series runner has 7 GB. Leave room for the parent,
       # compiler toolchain, and runner services around the limited case process.
       CASE_MEMORY_GB: ${{ matrix.platform == 'linux' && (github.event.repository.private && '6' || '12') || '4' }}
+      # Full-size level 3: the importer does not translate five models yet (a fused transformer encoder
+      # layer, in-place copy_, randn inside forward, einops' rearrange), and on Linux the address-space
+      # limit excludes the two models whose compile exceeds the 16 GB runner.
+      FULL_SIZE_EXCLUDES: >-
+        --exclude-case level3/32_ConvolutionalVisionTransformer.py
+        --exclude-case level3/33_VanillaRNN.py
+        --exclude-case level3/35_LSTM.py
+        --exclude-case level3/48_Mamba2ReturnY.py
+        --exclude-case level3/49_Mamba2ReturnFinalState.py
+        ${{ matrix.platform == 'linux' && '--exclude-case level3/16_DenseNet201.py --exclude-case level3/30_SwinTransformerV2.py' || '' }}
+      FULL_SIZE_MEMORY_GB: ${{ matrix.platform == 'linux' && '15' || '4' }}
 
     steps:
       - name: Checkout frontend and MimIR
@@ -123,8 +134,6 @@ jobs:
             --min-pass-rate ${{ matrix.min_pass_rate }} \
             --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}-size16.json
 
-      # Every level 3 model at full size. The five that still fail use constructs the importer does not
-      # translate: a fused transformer encoder layer, in-place copy_, randn inside forward, einops' rearrange.
       - name: Run level3 size1 full models
         if: matrix.level == 'level3'
         shell: bash
@@ -134,10 +143,11 @@ jobs:
             --suite level3 \
             --size-divisor 1 \
             --allow-invalid \
+            ${FULL_SIZE_EXCLUDES} \
             --timeout 600 \
-            --max-memory-gb "${CASE_MEMORY_GB}" \
+            --max-memory-gb "${FULL_SIZE_MEMORY_GB}" \
             --max-fp-iters 8192 \
-            --min-pass-rate 0.90 \
+            --min-pass-rate 1.00 \
             --results-json kernelbench-${{ matrix.platform }}-level3-size1.json
 
       - name: Upload results
