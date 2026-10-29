@@ -123,7 +123,9 @@ jobs:
             --min-pass-rate ${{ matrix.min_pass_rate }} \
             --results-json kernelbench-${{ matrix.platform }}-${{ matrix.level }}-size16.json
 
-      - name: Run level3 size1 maintained fixtures
+      # Every level 3 model at full size. The five that still fail use constructs the importer does not
+      # translate: a fused transformer encoder layer, in-place copy_, randn inside forward, einops' rearrange.
+      - name: Run level3 size1 full models
         if: matrix.level == 'level3'
         shell: bash
         run: |
@@ -131,12 +133,11 @@ jobs:
             --lighthouse lighthouse \
             --suite level3 \
             --size-divisor 1 \
-            --fixture-only \
-            --exclude-case level3/2_ShallowWideMLP.py \
-            --timeout 300 \
+            --allow-invalid \
+            --timeout 600 \
             --max-memory-gb "${CASE_MEMORY_GB}" \
             --max-fp-iters 8192 \
-            --min-pass-rate 1.00 \
+            --min-pass-rate 0.90 \
             --results-json kernelbench-${{ matrix.platform }}-level3-size1.json
 
       - name: Upload results
