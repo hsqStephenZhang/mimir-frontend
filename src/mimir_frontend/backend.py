@@ -76,6 +76,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from functools import lru_cache
@@ -120,6 +121,20 @@ _LIBC.free.restype = None
 # current directory, so compilation chdirs into a scratch dir; the lock keeps
 # that process-global state change safe.
 _compile_lock = threading.Lock()
+_last_compile_timings: dict[str, float] | None = None
+
+
+def last_compile_timings() -> dict[str, float] | None:
+    """Wall-clock seconds per stage of the most recent compile, or None after a cache hit."""
+    return dict(_last_compile_timings) if _last_compile_timings is not None else None
+
+
+def _timed(timings: dict[str, float], stage: str, function):
+    started = time.perf_counter()
+    try:
+        return function()
+    finally:
+        timings[stage] = time.perf_counter() - started
 
 
 def _stat_sig(path: Path) -> str:
@@ -392,7 +407,7 @@ def _output_tensors_from_metadata(container) -> list[torch.Tensor]:
     return outputs
 
 
-def _compile_world(driver, world, build_dir: Path, name: str, debug_dir, profile):
+def _compile_world(driver, world, build_dir: Path, name: str, debug_dir, profile, timings):
     """Optimize, emit, and load one graph while cwd points at its build dir."""
     try:
         with _compile_lock:
@@ -404,7 +419,7 @@ def _compile_world(driver, world, build_dir: Path, name: str, debug_dir, profile
                     world.write()
                 world.set(name)
                 try:
-                    world.optimize()
+                    _timed(timings, "optimize", world.optimize)
                 except Exception:
                     if debug_dir:
                         world.set(f"{name}_failed")
@@ -414,7 +429,7 @@ def _compile_world(driver, world, build_dir: Path, name: str, debug_dir, profile
                     world.set(f"{name}_post")
                     world.write()
                 jit = mim.JIT(name, [name])
-                lib = jit.compile_and_load()
+                lib = _timed(timings, "jit", jit.compile_and_load)
                 built_lib = Path(jit._get_so_path()).resolve()
             finally:
                 os.chdir(old_cwd)
@@ -431,6 +446,9 @@ def mimir_backend(
     options: dict | None = None,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Compile a Dynamo FX graph to native code through MimIR."""
+    global _last_compile_timings
+    backend_started = time.perf_counter()
+    timings: dict[str, float] = {}
     opts = dict(options or {})
     debug_dir = opts.pop("debug_dir", None) or os.environ.get("MIMIR_DEBUG_DIR")
     profile = opts.pop("profile", None) or os.environ.get("MIMIR_PROFILE")
@@ -463,7 +481,11 @@ def mimir_backend(
     # Ask PyTorch to expand only the explicitly selected fallback operators.
     # Supported semantic operators, including native_layer_norm, remain intact
     # and map directly to MimIR Torch axioms.
-    gm = apply_decomposition_policy(gm, example_inputs, decomposition_policy)
+    gm = _timed(
+        timings,
+        "decompose",
+        lambda: apply_decomposition_policy(gm, example_inputs, decomposition_policy),
+    )
 
     output_node = next(n for n in gm.graph.nodes if n.op == "output")
     container = output_node.args[0]
@@ -502,6 +524,7 @@ def mimir_backend(
     # debug_dir and profile both require an actual compile to observe.
     if cache_enabled and not debug_dir and not profile and cached_so.exists():
         lib = _load_cached_library(cached_so)
+        _last_compile_timings = None
 
     if lib is None:
         transient_build_dir = None
@@ -551,13 +574,18 @@ def mimir_backend(
                     "trace": mim.Profile.Trace,
                 }[profile]
 
-            build_model_function(
-                world, gm, input_shapes, input_dtypes=input_dtypes, name=name
-            )
-            install_execution_compile_phase(world)
+            def translate():
+                build_model_function(
+                    world, gm, input_shapes, input_dtypes=input_dtypes, name=name
+                )
+                install_execution_compile_phase(world)
+
+            _timed(timings, "translate", translate)
             lib, built_lib = _compile_world(
-                driver, world, build_dir, name, debug_dir, profile
+                driver, world, build_dir, name, debug_dir, profile, timings
             )
+            timings["total"] = time.perf_counter() - backend_started
+            _last_compile_timings = timings
 
             if cache_enabled:
                 _cache_store(cache_dir, [built_lib, build_dir / f"{name}.ll"])
@@ -567,11 +595,13 @@ def mimir_backend(
             if manifest_path is not None:
                 manifest["status"] = "succeeded"
                 manifest["artifacts"] = _artifact_names(build_dir, name)
+                manifest["timings"] = timings
                 _write_debug_manifest(manifest_path, manifest)
         except Exception as exc:
             if manifest_path is not None:
                 manifest["status"] = "failed"
                 manifest["artifacts"] = _artifact_names(build_dir, name)
+                manifest["timings"] = timings
                 manifest["error"] = {
                     "type": type(exc).__name__,
                     "message": str(exc)[-4000:],

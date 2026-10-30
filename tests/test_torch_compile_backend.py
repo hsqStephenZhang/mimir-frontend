@@ -1757,6 +1757,25 @@ def test_debug_dir_dumps_artifacts(tmp_path):
     assert not any("value" in tensor for tensor in manifest["inputs"])
 
 
+def test_debug_manifest_records_stage_timings(tmp_path):
+    model = LinearMLP()
+    x = torch.randn(4, 16)
+    with torch.no_grad():
+        compiled = torch.compile(
+            model,
+            backend="mimir",
+            options={"debug_dir": str(tmp_path), "cache_dir": str(tmp_path)},
+        )
+        compiled(x)
+    manifest = json.loads(next(tmp_path.glob("mimir_graph_*_manifest.json")).read_text())
+    timings = manifest["timings"]
+    assert set(timings) == {"decompose", "translate", "optimize", "jit", "total"}
+    assert all(isinstance(value, float) and value >= 0 for value in timings.values())
+    stages = timings["decompose"] + timings["translate"] + timings["optimize"] + timings["jit"]
+    assert timings["total"] >= stages
+    assert backend_module.last_compile_timings() == timings
+
+
 def test_debug_manifest_records_fixed_point_failure(tmp_path):
     compiled = torch.compile(
         LinearMLP(),

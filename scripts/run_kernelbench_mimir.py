@@ -8,6 +8,7 @@ import ast
 from dataclasses import asdict, dataclass, field
 import importlib.util
 import json
+import os
 from pathlib import Path
 import resource
 import subprocess
@@ -20,7 +21,7 @@ from typing import Any
 import torch
 import yaml
 
-from mimir_frontend.backend import mimir_backend
+from mimir_frontend.backend import last_compile_timings, mimir_backend
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -387,6 +388,8 @@ def run_case(
                 "compile_execute",
                 lambda: compiled(*inputs),
             )
+            for stage, seconds in (last_compile_timings() or {}).items():
+                timings[f"backend_{stage}"] = seconds
         except Exception as exc:
             raise PhaseError("compile_execute", exc) from exc
         try:
@@ -602,6 +605,9 @@ def main() -> int:
         torch._dynamo.reset()
         if args.direct:
             apply_memory_limit(args.max_memory_gb)
+            if debug_root := os.environ.get("MIMIR_DEBUG_DIR"):
+                # One dump directory per case, so profiles and manifests can be joined with results.
+                os.environ["MIMIR_DEBUG_DIR"] = str(Path(debug_root) / Path(name).stem)
             result = execute_direct(case, args.lighthouse, args.size_divisor, args.max_fp_iters)
             print(RESULT_PREFIX + json.dumps(asdict(result)), flush=True)
         else:

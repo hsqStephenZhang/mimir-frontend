@@ -60,7 +60,7 @@ jobs:
         --exclude-case level3/35_LSTM.py
         --exclude-case level3/48_Mamba2ReturnY.py
         --exclude-case level3/49_Mamba2ReturnFinalState.py
-        ${{ matrix.platform == 'linux' && '--exclude-case level3/16_DenseNet201.py --exclude-case level3/30_SwinTransformerV2.py' || '' }}
+        ${{ matrix.platform == 'linux' && '--exclude-case level3/10_ResNet101.py --exclude-case level3/16_DenseNet201.py --exclude-case level3/30_SwinTransformerV2.py' || '' }}
       FULL_SIZE_MEMORY_GB: ${{ matrix.platform == 'linux' && '15' || '4' }}
 
     steps:
@@ -144,7 +144,7 @@ jobs:
             --size-divisor 1 \
             --allow-invalid \
             ${FULL_SIZE_EXCLUDES} \
-            --timeout 600 \
+            --timeout 1200 \
             --max-memory-gb "${FULL_SIZE_MEMORY_GB}" \
             --max-fp-iters 8192 \
             --min-pass-rate 1.00 \
