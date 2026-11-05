@@ -56,11 +56,11 @@
                 if is_static:
                     v_step = step if step is not None else 1
                     if end is None:
-                        out_dims.append(self.world.top_nat())
+                        out_dims.append(self.world.top(world.type_nat()))
                     else:
                         out_dims.append(self.world.lit_nat((end - start + v_step - 1) // v_step))
                 else:
-                    out_dims.append(self.world.top_nat())
+                    out_dims.append(self.world.top(world.type_nat()))
             else:
                 starts.append(self.world.lit_nat(0))
                 steps.append(self.world.lit_nat(1))
