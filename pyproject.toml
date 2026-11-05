@@ -35,3 +35,8 @@ markers = [
 [tool.ty.environment]
 python = ".venv"
 python-version = "3.14"
+
+[dependency-groups]
+dev = [
+    "libclang>=18.1.1",
+]

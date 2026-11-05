@@ -14,7 +14,7 @@ fetch_plugin() {
     git -C "${dir}" fetch -q origin "$3"
     git -C "${dir}" checkout -q --detach FETCH_HEAD
 }
-fetch_plugin torch   https://github.com/hsqStephenZhang/mimir-torch-plugin.git   "${MIMIR_TORCH_PLUGIN_REF:-dev}"
+fetch_plugin torch   https://github.com/hsqStephenZhang/mimir-torch-plugin.git   "${MIMIR_TORCH_PLUGIN_REF:-nominal}"
 fetch_plugin runtime https://github.com/hsqStephenZhang/mimir-runtime-plugin.git "${MIMIR_RUNTIME_PLUGIN_REF:-feat/ll-emit}"
 
 if [[ ! -d "${ROOT_DIR}/.venv" ]]; then
@@ -36,5 +36,27 @@ cmake -S "${MIMIR_DIR}" -B "${BUILD_DIR}" \
     -DPython_EXECUTABLE="${PYTHON_BIN}"
 cmake --build "${BUILD_DIR}" --target mim_py -j "${MIMIR_BUILD_JOBS:-8}"
 
+# MimIR stages the package under build/python without packaging metadata; wrap it so uv can install it.
+STAGE_DIR="${BUILD_DIR}/mim_py_stage/main"
+rm -rf "${STAGE_DIR}"
+mkdir -p "${STAGE_DIR}/src"
+cp -R "${BUILD_DIR}/python/mim" "${STAGE_DIR}/src/mim"
+cat > "${STAGE_DIR}/pyproject.toml" <<'EOF'
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mim"
+version = "0.5.0.dev0"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mim = ["*.so", "*.pyd", "*.dll", "*.pyi", "py.typed", "plug/**/*"]
+EOF
+
 cd "${ROOT_DIR}"
-uv sync
+uv sync --reinstall-package mim

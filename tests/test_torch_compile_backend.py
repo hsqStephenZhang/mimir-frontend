@@ -1410,7 +1410,7 @@ def test_cross_entropy_empty_probability_classes_matches_eager():
     assert torch.isnan(Model()(logits, target))
     with pytest.raises(
         torch._dynamo.exc.BackendCompilerFailed,
-        match="explicit tensor type boundary",
+        match="cross_entropy input must have rank >= 1",
     ):
         torch.compile(Model(), backend=mimir_backend)(logits, target)
 

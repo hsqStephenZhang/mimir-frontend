@@ -1500,11 +1500,9 @@ class FXGraphTranslator:
             # Check if obj is a tensor by inspecting its type
             ty = obj.type()
             
-            if isinstance(ty, (mim.Arr, mim.Seq)) or obj in self.ops._shape_cache:
+            if self.ops.tensor_type_parts(ty) is not None:
                 # Handle tensor indexing/slicing
-                if isinstance(index, mim.Def) and isinstance(
-                    index.type(), (mim.Arr, mim.Seq)
-                ):
+                if isinstance(index, mim.Def) and self.ops.tensor_type_parts(index.type()) is not None:
                     return self.ops.index_tensor(obj, index)
                 if isinstance(index, int):
                     return self.ops.select(obj, 0, index)
@@ -1956,19 +1954,11 @@ class FXGraphTranslator:
             return args
 
     def _tensor_type_parts(self, tensor_type: mim.Def) -> tuple[list[mim.Def], mim.Def]:
-        dims = []
-        elem_type = tensor_type
-        while isinstance(elem_type, mim.Seq):
-            dims.extend(self.ops._seq_axes(elem_type))
-            elem_type = elem_type.body()
-        return dims, elem_type
+        parts = self.ops.tensor_type_parts(tensor_type)
+        return ([], tensor_type) if parts is None else parts
 
     def _rebuild_tensor_type(self, dims: list[mim.Def], elem_type: mim.Def) -> mim.Def:
-        if not dims:
-            return elem_type
-        if len(dims) == 1:
-            return self.world.arr(dims[0], elem_type)
-        return self.world.arr(self.world.tuple(dims), elem_type)
+        return self.ops.tensor_type(dims, elem_type)
 
     def _specialize_input_type(self, tensor_type: mim.Def, input_index: int) -> mim.Def:
         if not hasattr(self, "input_sym_names") or input_index >= len(self.input_sym_names):
@@ -2000,7 +1990,7 @@ class FXGraphTranslator:
 
         old_sym_map = self.ops.sym_map
         num_params = len(input_types) + 1
-        dom_with_ret = self.world.mut_sigma(self.world.type(self.world.lit_univ(0)), num_params)
+        dom_with_ret = self.world.mut_sigma(self.world.type(self.world.lit_level_0()), num_params)
 
         for i in range(num_sym):
             dom_with_ret.set(i, self.world.type_nat())
@@ -2026,13 +2016,7 @@ class FXGraphTranslator:
             for sym_name, sym_param in zip(sym_names, lam_sym_params):
                 self.ops.sym_map[sym_name] = sym_param
 
-        # lower_to_mem needs boundary tensors annotated, or scalarize splits them into parts.
-        tensor_buf = self.world.annex(_tensor_dialect.buf.value)
-        def _as_buf(v):
-            return self.world.app(self.world.app(tensor_buf, v.type()), v) \
-                if v.type().node_name() == "Arr" else v
-        actual_inputs = [_as_buf(lam.var().proj(num_params, i))
-                         for i in range(num_sym, num_sym + num_inputs)]
+        actual_inputs = [lam.var().proj(num_params, i) for i in range(num_sym, num_sym + num_inputs)]
         if hasattr(self, "input_shapes"):
             for input_index, (actual_input, shape) in enumerate(
                 zip(actual_inputs[:len(placeholders)], self.input_shapes)

@@ -569,9 +569,9 @@ def mimir_backend(
             if profile:
                 # Phases only record spans while this flag is set (see mim Phase::run).
                 driver.flags().profile = {
-                    "summary": mim.Profile.Summary,
-                    "tree": mim.Profile.Tree,
-                    "trace": mim.Profile.Trace,
+                    "summary": mim.FlagsProfile.Summary,
+                    "tree": mim.FlagsProfile.Tree,
+                    "trace": mim.FlagsProfile.Trace,
                 }[profile]
 
             def translate():
@@ -615,7 +615,8 @@ def mimir_backend(
                 shutil.rmtree(transient_build_dir, ignore_errors=True)
 
     fn = lib[name]
-    scalar_input = [all(extent == 1 for extent in shape) for shape in input_shapes]
+    # Every tensor parameter, rank 0 included, bufferizes to a pointer.
+    scalar_input = [False for _ in input_shapes]
     empty_input = [math.prod(shape) == 0 for shape in input_shapes]
     scalar_ctypes = {
         torch.float32: ctypes.c_float,

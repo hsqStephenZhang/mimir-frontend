@@ -38,7 +38,7 @@ def _element_type_from_dtype(world: mim.World, ops, dtype) -> mim.Def:
     if dtype_text.startswith("b") or dtype is torch.bool:
         return world.type_bool()
     if dtype_text.startswith("i") or dtype in (torch.int64, torch.int32, torch.long):
-        return world.type_idx(world.top_nat())
+        return world.type_idx(world.top(world.type_nat()))
     return ops.F32
 
 
@@ -151,7 +151,7 @@ def translate_inductor_readable(case_or_path: str | Path, root: Path = DEFAULT_I
         return translator.translate(graph_module.graph, inputs)
 
     num_params = len(inputs) + 1
-    dom_with_ret = world.mut_sigma(world.type(world.lit_univ(0)), num_params)
+    dom_with_ret = world.mut_sigma(world.type(world.lit_level_0()), num_params)
     for i, inp in enumerate(inputs):
         dom_with_ret.set(i, inp.type())
         

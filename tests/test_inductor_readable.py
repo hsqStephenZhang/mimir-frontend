@@ -12,10 +12,6 @@ def make_graph_module(source: str) -> fx.GraphModule:
     return fx.symbolic_trace(namespace["GraphModule"]())
 
 
-def seq_axes(seq):
-    """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
-    shape = seq.shape()
-    return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
 
 
 def tensor_shape_values(tensor_def):
@@ -23,12 +19,10 @@ def tensor_shape_values(tensor_def):
 
 
 def tensor_shape_defs(tensor_def):
-    dims = []
-    tensor_type = tensor_def.type()
-    while isinstance(tensor_type, mim.Seq):
-        dims.extend(seq_axes(tensor_type))
-        tensor_type = tensor_type.body()
-    return dims
+    from mimir_frontend.translator import FXGraphTranslator
+
+    parts = FXGraphTranslator(tensor_def.world()).ops.tensor_type_parts(tensor_def.type())
+    return [] if parts is None else parts[0]
 
 
 def test_make_mimir_inputs_from_annotations_prefers_fake_tensor_meta_shape():
@@ -83,7 +77,7 @@ class GraphModule(torch.nn.Module):
     x, y = make_mimir_inputs_from_annotations(world, graph_module)
 
     assert tensor_shape_defs(x)[0] == tensor_shape_defs(y)[0]
-    assert tensor_shape_defs(x)[0] != world.top_nat()
+    assert tensor_shape_defs(x)[0] != world.top(world.type_nat())
 
 
 def test_make_mimir_inputs_from_annotations_shares_sym_parameter_with_tensor_dim():

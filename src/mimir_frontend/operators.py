@@ -38,7 +38,6 @@ class OperatorLibrary:
         self.Bool = world.type_bool()
         self.mode0 = world.lit_nat_0()
         self.sym_map = {} # Mapping from symbolic name to MimIR Nat variable
-        self._shape_cache: dict[mim.Def, list[mim.Def]] = {}
         self._torch_semantics_cache: dict[tuple[mim.Def, bool], mim.Def] = {}
         self._flip_provenance: dict[mim.Def, tuple[mim.Def, tuple[int, ...]]] = {}
         self._cumsum_provenance: dict[mim.Def, tuple[mim.Def, int, object]] = {}
@@ -121,95 +120,75 @@ class OperatorLibrary:
         return self._lit_nat(len(dims)), self.world.tuple(dims)
 
     def _physical_dims(self, dims):
-        """Drop folded singleton axes while preserving tensor-vs-scalar rank."""
-        physical = [dim for dim in dims if not self._is_lit_nat_value(dim, 1)]
-        if not physical and dims:
-            # Nested singleton arrays normalize to their element type, but a
-            # logical tensor still needs one extent-1 loop axis. Rank zero is
-            # reserved for genuine scalar tensors.
-            return [dims[-1]]
-        return physical
+        """Nominal tensors keep every axis, so the physical shape is the logical one."""
+        return list(dims)
 
     def _rank_and_type_shape(self, tensor_def):
-        dims = self._shape_dims(tensor_def)
-        return self._lit_nat(len(dims)), self.world.tuple(dims)
+        return self._rank_and_shape(tensor_def)
+
+    def tensor_type(self, dims, elem_type):
+        """`tensor.Tensor r s T` for the logical shape `dims`."""
+        callee = self.world.annex(tensor.Tensor.value)
+        callee = self.world.app(callee, self._lit_nat(len(dims)))
+        callee = self.world.app(callee, self.world.tuple(list(dims)))
+        return self.world.app(callee, elem_type)
+
+    def tensor_type_parts(self, tensor_type):
+        """`(dims, elem_type)` of a `tensor.Tensor` type, or `None` for any other type."""
+        if tensor_type.node_name() != "Nom":
+            return None
+        # The private representation is `[indices: «(r, s, ⊥:T)», data: «s; T»]`; the singleton witness
+        # keeps rank, shape and element type even where arrays would fold.
+        witness = tensor_type.op().proj(2, 0)
+        if witness.node_name() != "Single":
+            return None
+        rank_def, shape, tag = witness.op().projs(3)
+        rank = rank_def.get_nat()
+        return [shape.proj(rank, i) for i in range(rank)], tag.type()
 
     def shape_of(self, value):
-        """
-        Unified way to retrieve shape dims from a MimIR Def or PyTorch object.
-        Priority:
-        1. Explicitly mapped symbolic dims (for inputs)
-        2. Local shape cache (for derived tensors, preserves 1-dims)
-        3. MimIR Type system (Arr arity)
-        4. PyTorch metadata (FakeTensor)
-        """
-        cached = self._shape_cache.get(value)
-        if cached is not None:
-            return list(cached)
-
+        """Logical shape dims of a MimIR tensor value or a PyTorch object; a scalar has `[]`."""
         if isinstance(value, mim.Def):
-            # 1. Check symbolic map for inputs
             if hasattr(self, "input_to_syms") and value in self.input_to_syms:
                 sym_names = self.input_to_syms[value]
                 dims = self._shape_dims(value)
-                final_dims = []
-                for i, name in enumerate(sym_names):
-                    if name is not None and name in self.sym_map:
-                        final_dims.append(self.sym_map[name])
-                    else:
-                        final_dims.append(dims[i])
-                return final_dims
+                return [
+                    self.sym_map[name] if name is not None and name in self.sym_map else dims[i]
+                    for i, name in enumerate(sym_names)
+                ]
+            return self._shape_dims(value)
 
-            # 2. Check cache FIRST to preserve singleton (1) dimensions
-            # because MimIR type system normalizes them away.
-            cached = self._shape_cache.get(value)
-            if cached is not None:
-                return list(cached)
-
-            # 3. Try type system
-            dims = self._shape_dims(value)
-            return dims
-        
-        # 4. Fallback to metadata
         if hasattr(value, "meta") and isinstance(value.meta, dict) and "val" in value.meta:
             return self.shape_of(value.meta["val"])
         if hasattr(value, "shape"):
-             return [self._lit_nat(d) if isinstance(d, int) else d for d in value.shape]
-             
+            return [self._lit_nat(d) if isinstance(d, int) else d for d in value.shape]
+
         raise TypeError(f"shape_of does not support {type(value)}")
 
     def _remember_shape(self, value, dims):
-        normalized = []
-        for dim in dims:
-            if isinstance(dim, int):
-                normalized.append(self._lit_nat(dim))
-            else:
-                normalized.append(dim)
-        try:
-            self._shape_cache[value] = normalized
-        except TypeError:
-            pass
+        """The shape lives in the nominal type now; kept as the identity for its many call sites."""
         return value
+
+    def _opt_type(self, elem_type):
+        return self.world.app(self.world.annex(option.Opt.value), elem_type)
+
+    def _opt_none(self, elem_type):
+        """`option.Opt#None` at `elem_type`."""
+        opt_type = self._opt_type(elem_type)
+        return self.world.name(opt_type, self.world.inj(opt_type.op(), 0, self.world.tuple([])))
+
+    def _opt_some(self, value):
+        """`option.Opt#Some value`."""
+        opt_type = self._opt_type(value.type())
+        return self.world.name(opt_type, self.world.inj(opt_type.op(), 1, value))
 
     def _set_lam(self, lam, body):
         """Lam.set_body no longer takes the filter; set both ops at once."""
         return lam.set([self.world.lit_tt(), body])
 
-    def _seq_axes(self, seq):
-        """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
-        shape = seq.shape()
-        return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
-
     def _shape_dims(self, tensor_def):
-        dims = []
-        tensor_type = tensor_def.type()
-        while isinstance(tensor_type, mim.Seq):
-            axes = self._seq_axes(tensor_type)
-            if not axes:
-                break
-            dims.extend(axes)
-            tensor_type = tensor_type.body()
-        return dims
+        parts = self.tensor_type_parts(tensor_def.type())
+        return [] if parts is None else parts[0]
 
     def _is_lit_nat_value(self, value, expected: int) -> bool:
         return isinstance(value, mim.Lit) and value.get_nat() == expected
@@ -247,10 +226,8 @@ class OperatorLibrary:
         return lam
 
     def _tensor_element_type(self, tensor_def):
-        tensor_type = tensor_def.type()
-        while isinstance(tensor_type, mim.Seq):
-            tensor_type = tensor_type.body()
-        return tensor_type
+        parts = self.tensor_type_parts(tensor_def.type())
+        return tensor_def.type() if parts is None else parts[1]
 
     def binary(self, op, lhs, rhs, out_type=None):
         """
@@ -458,20 +435,10 @@ class OperatorLibrary:
         return self._remember_shape(result, dims)
 
     def _broadcast_metadata(self, dims, output_dims):
-        physical_axes = [
-            axis for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and dims:
-            physical_axes = [len(dims) - 1]
+        physical_axes = list(range(len(dims)))
         physical_dims = [dims[axis] for axis in physical_axes]
 
-        output_physical_axes = [
-            axis for axis, extent in enumerate(output_dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not output_physical_axes and output_dims:
-            output_physical_axes = [len(output_dims) - 1]
+        output_physical_axes = list(range(len(output_dims)))
         output_rank = len(output_physical_axes)
         idx_type = self.world.type_idx(self._lit_nat(output_rank))
         offset = len(output_dims) - len(dims)
@@ -649,13 +616,8 @@ class OperatorLibrary:
 
         def optional_bound(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), elem_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value),
-                self._float_lit(elem_type, value),
-            )
+                return self._opt_none(elem_type)
+            return self._opt_some(self._float_lit(elem_type, value))
 
         callee = self.world.annex(torch_dialect.activation.clamp.value)
         callee = self.world.app(callee, self._torch_semantics(x))
@@ -699,13 +661,11 @@ class OperatorLibrary:
     # Unary
     def exp(self, x): return self._torch_unary("unary.exp", x, floating=True)
     def log(self, x):
-        # A logical rank-0 Torch tensor is the scalar itself in MimIR's
-        # physical representation.  Applying the rank-polymorphic tensor
-        # schema would wrap that scalar in a non-assignable empty shape.
-        if not self.shape_of(x) and not isinstance(x.type(), mim.Seq):
-            if self._tensor_element_type(x) != self.F32:
-                raise NotImplementedError("rank-0 log currently requires float32")
-            return self._remember_shape(self.world.app(self.f32_log_axm, x), [])
+        if self.tensor_type_parts(x.type()) is None:
+            # A bare scalar, not a rank-0 tensor.
+            if x.type() != self.F32:
+                raise NotImplementedError("scalar log currently requires float32")
+            return self.world.app(self.f32_log_axm, x)
         return self._torch_unary("unary.log", x, floating=True)
     def tanh(self, x): return self._torch_unary("activation.tanh", x, floating=True)
     def sqrt(self, x): return self._torch_unary("unary.sqrt", x, floating=True)
@@ -1062,7 +1022,7 @@ class OperatorLibrary:
         # for broadcast semantics, but pass the folded physical shape/rank to
         # the tensor dialect together with the original logical output-axis
         # mapping.
-        physical_axes = [i for i, dim in enumerate(in_dims) if not self._is_lit_nat_value(dim, 1)]
+        physical_axes = list(range(len(in_dims)))
         physical_dims = [in_dims[i] for i in physical_axes]
         in_rank_val = len(physical_dims)
 
@@ -1092,10 +1052,7 @@ class OperatorLibrary:
         # A scalar tensor has no index tuple.  Keep the established tensor
         # map path for this case; `%torch.shape.expand` requires an array input.
         if in_rank_val == 0:
-            if input.type() == elem_type:
-                scalar = input
-            else:
-                scalar = self.world.extract(input, self.world.tuple([]))
+            scalar = self.scalar_value(input)
             callee = self.world.annex(torch_dialect.creation.full.value)
             callee = self._apply_grouped(callee, [elem_type, out_rank])
             result = self.world.app(callee, [out_shape_tuple, scalar])
@@ -1267,20 +1224,12 @@ class OperatorLibrary:
         return self._remember_shape(result, [])
 
     def scalar_value(self, value):
-        """Extract a logical rank-0 tensor at the native function boundary."""
-        if self.shape_of(value):
+        """Extract a rank-0 tensor's element at the native function boundary."""
+        parts = self.tensor_type_parts(value.type())
+        if parts is None or parts[0]:
             return value
-        value_type = value.type()
-        if not isinstance(value_type, mim.Seq):
-            return value
-        elem_type = self._tensor_element_type(value)
-        getter = self.world.annex(tensor.get.value)
-        getter = self._apply_grouped(
-            getter, [elem_type, self._lit_nat(0), self.world.tuple([])]
-        )
-        return self.world.app(
-            getter, self.world.tuple([self.world.tuple([]), value])
-        )
+        item = self.world.app(self.world.annex(tensor.item.value), parts[1])
+        return self.world.app(item, value)
 
     def fill_scalar(self, input, value):
         dims = self.shape_of(input)
@@ -1443,10 +1392,7 @@ class OperatorLibrary:
         output_dims = self.rules.reduce_shape_spec(
             logical_dims, dim=canonical, keepdim=keepdim
         ).output_dims
-        physical_axes = [
-            axis for axis, extent in enumerate(logical_dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(logical_dims)))
         physical_dims = [logical_dims[axis] for axis in physical_axes]
         reduced_axes = [
             physical_axes.index(axis) for axis in canonical if axis in physical_axes
@@ -1528,122 +1474,44 @@ class OperatorLibrary:
         dims = self.shape_of(input)
         rank = len(dims)
         canonical = dim + rank if dim < 0 else dim
-        physical_axes = [
-            axis for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and dims:
-            physical_axes = [rank - 1]
-        physical_dims = self._physical_dims(dims)
-        reduced_dims = dims[:canonical] + dims[canonical + 1:]
+        if not 0 <= canonical < rank:
+            raise ValueError(f"{kind} dimension {dim} is out of range for rank {rank}")
 
-        if 0 <= canonical < rank and canonical not in physical_axes:
-            callee = self.world.annex(torch_dialect.creation.full.value)
-            callee = self._apply_grouped(
-                callee, [self.I64, self._lit_nat(len(physical_dims))]
-            )
-            indices = self.world.app(
-                callee,
-                self.world.tuple(
-                    [self.world.tuple(physical_dims), _lit_i64(self.world, 0)]
-                ),
-            )
-            result_dims = list(dims) if keepdim else reduced_dims
-            return (
-                self._remember_shape(input, result_dims),
-                self._remember_shape(indices, result_dims),
-            )
-
-        physical_dim = (
-            physical_axes.index(canonical)
-            if 0 <= canonical < rank and canonical in physical_axes
-            else len(physical_dims)
-        )
         callee = self.world.annex(
             torch_dialect.reduction.max_dim.value
             if kind == "max"
             else torch_dialect.reduction.min_dim.value
         )
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
-        callee = self._apply_grouped(
-            callee,
-            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
-        )
-        callee = self.world.app(callee, _lit_i64(self.world, physical_dim))
+        callee = self._apply_grouped(callee, [self._lit_nat(rank), self.world.tuple(dims)])
+        callee = self.world.app(callee, _lit_i64(self.world, canonical))
         result = self.world.app(callee, input)
         outputs = [result.proj(3, 1), result.proj(3, 2)]
-        for output in outputs:
-            self._remember_shape(output, reduced_dims)
         if keepdim:
             keep_dims = list(dims)
             keep_dims[canonical] = self._lit_nat(1)
             outputs = [self.reshape(output, keep_dims) for output in outputs]
         return tuple(outputs)
 
-    def _softmax(self, input, dim, op, singleton_value):
-        """Emit common softmax semantics while preserving logical singleton axes."""
+    def _softmax(self, input, dim, op):
         dims = self.shape_of(input)
-        logical_rank = len(dims)
-        canonical_dim = dim + logical_rank if dim < 0 else dim
-        valid_logical_dim = 0 <= canonical_dim < logical_rank
-
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and dims:
-            physical_axes = [logical_rank - 1]
-        physical_dims = self._physical_dims(dims)
-
-        # Reduction over a folded singleton is known statically: softmax is
-        # one and log_softmax is zero, so PE can eliminate the full operator.
-        if valid_logical_dim and canonical_dim not in physical_axes:
-            elem_type = self._tensor_element_type(input)
-            callee = self.world.annex(torch_dialect.creation.full.value)
-            callee = self._apply_grouped(
-                callee, [elem_type, self._lit_nat(len(physical_dims))]
-            )
-            result = self.world.app(
-                callee,
-                self.world.tuple(
-                    [
-                        self.world.tuple(physical_dims),
-                        self._float_lit(elem_type, singleton_value),
-                    ]
-                ),
-            )
-            return self._remember_shape(result, dims)
-
-        # Preserve invalid dimensions as invalid MimIR inputs. The Torch
-        # plugin's precondition then owns static diagnostics/runtime checks.
-        physical_dim = (
-            physical_axes.index(canonical_dim)
-            if valid_logical_dim
-            else len(physical_dims)
-        )
+        rank = len(dims)
+        canonical = dim + rank if dim < 0 else dim
+        # An invalid dimension is handed to MimIR as such; the Torch plugin's precondition owns the diagnostics.
+        dimension = canonical if 0 <= canonical < rank else rank
         callee = self.world.annex(op.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
-        callee = self._apply_grouped(
-            callee,
-            [self._lit_nat(len(physical_dims)), self.world.tuple(physical_dims)],
-        )
-        callee = self.world.app(
-            callee,
-            self.world.tuple(
-                [_lit_i64(self.world, physical_dim), self.world.lit_ff()]
-            ),
-        )
-        result = self.world.app(callee, input)
-        return self._remember_shape(result, dims)
+        callee = self._apply_grouped(callee, [self._lit_nat(rank), self.world.tuple(dims)])
+        callee = self.world.app(callee, self.world.tuple([_lit_i64(self.world, dimension), self.world.lit_ff()]))
+        return self.world.app(callee, input)
 
     def softmax(self, input, dim=-1):
         """Emit API-level softmax; stabilization and reduction live in MimIR."""
-        return self._softmax(input, dim, torch_dialect.normalization.softmax, 1.0)
+        return self._softmax(input, dim, torch_dialect.normalization.softmax)
 
     def log_softmax(self, input, dim=-1):
         """Emit API-level log_softmax; stabilization and reduction live in MimIR."""
-        return self._softmax(input, dim, torch_dialect.normalization.log_softmax, 0.0)
+        return self._softmax(input, dim, torch_dialect.normalization.log_softmax)
 
     def flip(self, input, dims):
         """Map logical Torch axes to the singleton-folded physical tensor rank."""
@@ -1668,10 +1536,7 @@ class OperatorLibrary:
                     return self.cumsum(
                         inner_flip[0], cumsum_dim, dtype=dtype, reverse=True
                     )
-        physical_axes = [
-            axis for axis, extent in enumerate(logical_shape)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(logical_shape)))
         physical_shape = self._physical_dims(logical_shape)
         if valid:
             physical_dims = [
@@ -1714,10 +1579,7 @@ class OperatorLibrary:
         if not isinstance(dim, int):
             raise NotImplementedError("dynamic narrow dim is not implemented")
         canonical = dim + logical_rank if dim < 0 else dim
-        physical_axes = [
-            axis for axis, extent in enumerate(logical_shape)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(logical_shape)))
         physical_shape = self._physical_dims(logical_shape)
         if 0 <= canonical < logical_rank and canonical in physical_axes:
             physical_dim = physical_axes.index(canonical)
@@ -1812,20 +1674,15 @@ class OperatorLibrary:
             raise ValueError("normalized_shape must match the input suffix")
 
         elem_t = self._tensor_element_type(input)
-        normalized_type = self.world.arr(
-            self.world.tuple(normalized_dims), elem_t
-        )
+        normalized_type = self.tensor_type(normalized_dims, elem_t)
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), normalized_type
-                )
+                return self._opt_none(normalized_type)
             value_dims = self.shape_of(value)
             if not self.rules.same_shape(value_dims, normalized_dims):
                 raise ValueError("LayerNorm weight and bias must match normalized_shape")
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+            return self._opt_some(value)
 
         callee = self.world.annex(torch_dialect.normalization.native_layer_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -1851,15 +1708,12 @@ class OperatorLibrary:
         dims = self.shape_of(input)
         elem_type = self._tensor_element_type(input)
         channels = dims[1]
-        channel_type = self.world.arr(channels, elem_type)
+        channel_type = self.tensor_type([channels], elem_type)
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+                return self._opt_none(channel_type)
+            return self._opt_some(value)
 
         callee = self.world.annex(torch_dialect.normalization.group_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -1882,15 +1736,12 @@ class OperatorLibrary:
         """Map the full Aten `(output, mean, rstd)` group-normalization schema."""
         dims = self.shape_of(input)
         elem_type = self._tensor_element_type(input)
-        channel_type = self.world.arr(dims[1], elem_type)
+        channel_type = self.tensor_type([dims[1]], elem_type)
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+                return self._opt_none(channel_type)
+            return self._opt_some(value)
 
         def nat(value):
             if isinstance(value, mim.Def):
@@ -2004,11 +1855,11 @@ class OperatorLibrary:
                 "cross_entropy with folded singleton axes is not implemented"
             )
         classes = input_dims[class_dim]
-        channel_type = self.world.arr(classes, self._tensor_element_type(input))
+        channel_type = self.tensor_type([classes], self._tensor_element_type(input))
         optional_weight = (
-            self.world.app(self.world.annex(option.none.value), channel_type)
+            self._opt_none(channel_type)
             if weight is None else
-            self.world.implicit_app(self.world.annex(option.some.value), [weight])
+            self._opt_some(weight)
         )
         floating = self._torch_semantics(input, floating=True)
         target_constructor = (
@@ -2150,10 +2001,7 @@ class OperatorLibrary:
     def _torch_reduce(self, kind, input, dim, keepdim, *, result_type=None):
         dims = self.shape_of(input)
         logical_rank = len(dims)
-        physical_axes = [
-            axis for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(dims)))
         physical_dims = [dims[axis] for axis in physical_axes]
         rank = len(physical_dims)
         reduce_all = dim is None or (
@@ -2395,10 +2243,7 @@ class OperatorLibrary:
                 "var_mean dimensions must be non-empty, unique, and in range"
             )
 
-        physical_axes = [
-            axis for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(dims)))
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_reduction_dims = [
             physical_axes.index(axis)
@@ -2527,11 +2372,7 @@ class OperatorLibrary:
 
         # MimIR tensor types fold literal singleton dimensions. Preserve the
         # corresponding logical output axis in the in-dimension map.
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(self_dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(self_dims)))
         physical_self_dims = [self_dims[axis] for axis in physical_axes]
         output_offset = 2 - len(self_dims)
         idx2 = self.world.type_idx(self._lit_nat(2))
@@ -2634,19 +2475,19 @@ class OperatorLibrary:
         callee = self.world.app(callee, self.world.tuple(batch_dims))
         callee = self.world.app(callee, self.world.tuple([input, weight]))
         if bias is None:
-            bias_t = self.world.arr(out_features, elem_t)
-            optional_bias = self.world.app(self.world.annex(option.none.value), bias_t)
+            bias_t = self.tensor_type([out_features], elem_t)
+            optional_bias = self._opt_none(bias_t)
         else:
-            optional_bias = self.world.implicit_app(self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, optional_bias)
         output_dims = batch_dims + [out_features]
         return self._remember_shape(result, output_dims)
 
     def _optional_recurrent_bias(self, bias, size, elem_t):
         if bias is not None:
-            return self.world.implicit_app(self.world.annex(option.some.value), [bias])
-        bias_t = self.world.arr(size, elem_t)
-        return self.world.app(self.world.annex(option.none.value), bias_t)
+            return self._opt_some(bias)
+        bias_t = self.tensor_type([size], elem_t)
+        return self._opt_none(bias_t)
 
     def _recurrent_direction(
         self,
@@ -2716,11 +2557,7 @@ class OperatorLibrary:
         if len(states) == 1:
             return self.unsqueeze(states[0], 0)
         batch, hidden = self.shape_of(states[0])
-        # A literal batch extent of one is erased from MimIR's physical array
-        # type. Concatenating the remaining hidden axis still lays out complete
-        # states consecutively, and the final reshape restores [D*L, B, H].
-        cat_dim = 1 if self._is_lit_nat_value(batch, 1) else 0
-        flattened = self.cat(states, dim=cat_dim)
+        flattened = self.cat(states, dim=0)
         return self.reshape(flattened, [len(states), batch, hidden])
 
     def recurrent(
@@ -2873,15 +2710,12 @@ class OperatorLibrary:
         callee = self._apply_grouped(
             callee, [self._lit_nat(len(dims)), self.world.tuple(dims)]
         )
-        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+        channel_type = self.tensor_type([channels], self._tensor_element_type(input))
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+                return self._opt_none(channel_type)
+            return self._opt_some(value)
 
         result = self.world.app(
             callee,
@@ -2901,15 +2735,12 @@ class OperatorLibrary:
         if len(dims) < 2:
             raise NotImplementedError("batch_norm expects input rank >= 2")
         channels = dims[1]
-        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+        channel_type = self.tensor_type([channels], self._tensor_element_type(input))
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+                return self._opt_none(channel_type)
+            return self._opt_some(value)
 
         callee = self.world.annex(torch_dialect.normalization.batch_norm.value)
         callee = self.world.app(callee, self._torch_semantics(input, floating=True))
@@ -2945,13 +2776,11 @@ class OperatorLibrary:
         if len(dims) < 2:
             raise NotImplementedError("native_batch_norm expects input rank >= 2")
         channels = dims[1]
-        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+        channel_type = self.tensor_type([channels], self._tensor_element_type(input))
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
+                return self._opt_none(channel_type)
             value_dims = self.shape_of(value)
             if len(value_dims) != 1 or not self.rules._same_dim(
                 value_dims[0], channels
@@ -2959,8 +2788,7 @@ class OperatorLibrary:
                 raise ValueError(
                     "native_batch_norm affine parameters must have shape [channels]"
                 )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+            return self._opt_some(value)
 
         callee = self.world.annex(
             torch_dialect.normalization.native_batch_norm.value
@@ -2998,15 +2826,12 @@ class OperatorLibrary:
         if len(dims) < 2:
             raise NotImplementedError("native_batch_norm expects input rank >= 2")
         channels = dims[1]
-        channel_type = self.world.arr(channels, self._tensor_element_type(input))
+        channel_type = self.tensor_type([channels], self._tensor_element_type(input))
 
         def optional(value):
             if value is None:
-                return self.world.app(
-                    self.world.annex(option.none.value), channel_type
-                )
-            return self.world.implicit_app(
-                self.world.annex(option.some.value), [value])
+                return self._opt_none(channel_type)
+            return self._opt_some(value)
 
         for name, value in (("running_mean", running_mean),
                             ("running_var", running_var)):
@@ -3128,11 +2953,7 @@ class OperatorLibrary:
                 "and rank-5 NCDHW inputs"
             )
 
-        type_in_dims = self._shape_dims(x)
-        if len(type_in_dims) == 3 and self._is_lit_nat_value(semantic_in_dims[0], 1):
-            in_dims = [semantic_in_dims[0], type_in_dims[0], type_in_dims[1], type_in_dims[2]]
-        else:
-            in_dims = semantic_in_dims
+        in_dims = semantic_in_dims
 
         stride = self._pair(stride, "stride")
         padding = self._pair(padding, "padding")
@@ -3160,13 +2981,10 @@ class OperatorLibrary:
             ],
         )
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3233,13 +3051,10 @@ class OperatorLibrary:
         ]
         callee = self._apply_grouped(callee, [*pairs, self._to_nat(groups)])
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3296,13 +3111,10 @@ class OperatorLibrary:
             ],
         )
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3367,24 +3179,17 @@ class OperatorLibrary:
         ]
         callee = self._apply_grouped(callee, [*triples, self._to_nat(groups)])
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
     def convolution3d(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         semantic_in_dims = self.shape_of(x)
         weight_dims = self.shape_of(weight)
-        type_in_dims = self._shape_dims(x)
-        if len(type_in_dims) == 4 and self._is_lit_nat_value(semantic_in_dims[0], 1):
-            in_dims = [semantic_in_dims[0], *type_in_dims]
-        else:
-            in_dims = semantic_in_dims
+        in_dims = semantic_in_dims
 
         stride = self._triple(stride, "stride")
         padding = self._triple(padding, "padding")
@@ -3423,24 +3228,17 @@ class OperatorLibrary:
             ],
         )
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
     def convolution1d(self, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         semantic_in_dims = self.shape_of(x)
         weight_dims = self.shape_of(weight)
-        type_in_dims = self._shape_dims(x)
-        if len(type_in_dims) == 2 and self._is_lit_nat_value(semantic_in_dims[0], 1):
-            in_dims = [semantic_in_dims[0], type_in_dims[0], type_in_dims[1]]
-        else:
-            in_dims = semantic_in_dims
+        in_dims = semantic_in_dims
 
         stride = self._single(stride, "stride")
         padding = self._single(padding, "padding")
@@ -3467,13 +3265,10 @@ class OperatorLibrary:
             ],
         )
         if bias is None:
-            bias_type = self.world.arr(cout, self._tensor_element_type(x))
-            optional_bias = self.world.app(
-                self.world.annex(option.none.value), bias_type
-            )
+            bias_type = self.tensor_type([cout], self._tensor_element_type(x))
+            optional_bias = self._opt_none(bias_type)
         else:
-            optional_bias = self.world.implicit_app(
-                self.world.annex(option.some.value), [bias])
+            optional_bias = self._opt_some(bias)
         result = self.world.app(callee, self.world.tuple([x, weight, optional_bias]))
         return self._remember_shape(result, out_dims)
 
@@ -3536,11 +3331,7 @@ class OperatorLibrary:
         if len(semantic_in_dims) != 4:
             raise NotImplementedError("pool2d currently supports 4D NCHW inputs only")
 
-        type_in_dims = self._shape_dims(x)
-        if len(type_in_dims) == 3 and self._is_lit_nat_value(semantic_in_dims[0], 1):
-            in_dims = [semantic_in_dims[0], type_in_dims[0], type_in_dims[1], type_in_dims[2]]
-        else:
-            in_dims = semantic_in_dims
+        in_dims = semantic_in_dims
 
         kernel = self._pair(kernel_size, "kernel_size")
         if stride is None:
@@ -3751,13 +3542,10 @@ class OperatorLibrary:
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, h, w])
         if divisor_override is None:
-            optional_divisor = self.world.app(
-                self.world.annex(option.none.value), self.world.type_nat()
-            )
+            optional_divisor = self._opt_none(self.world.type_nat())
         else:
             divisor = self._to_nat(divisor_override)
-            optional_divisor = self.world.implicit_app(
-                self.world.annex(option.some.value), [divisor])
+            optional_divisor = self._opt_some(divisor)
         callee = self._apply_grouped(
             callee,
             [
@@ -3791,9 +3579,7 @@ class OperatorLibrary:
         callee = self.world.annex(torch_dialect.pool.avg_pool1d.value)
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, length])
-        divisor_override = self.world.app(
-            self.world.annex(option.none.value), self.world.type_nat()
-        )
+        divisor_override = self._opt_none(self.world.type_nat())
         callee = self.world.app(
             callee,
             self.world.tuple([
@@ -3827,12 +3613,9 @@ class OperatorLibrary:
         callee = self.world.app(callee, self._torch_semantics(x, floating=True))
         callee = self._apply_grouped(callee, [n, c, depth, height, width])
         if divisor_override is None:
-            optional_divisor = self.world.app(
-                self.world.annex(option.none.value), self.world.type_nat()
-            )
+            optional_divisor = self._opt_none(self.world.type_nat())
         else:
-            optional_divisor = self.world.implicit_app(
-                self.world.annex(option.some.value), [self._to_nat(divisor_override)])
+            optional_divisor = self._opt_some(self._to_nat(divisor_override))
         params = [
             self.world.tuple([self._to_nat(v) for v in values])
             for values in (kernel, stride, padding)
@@ -3960,6 +3743,8 @@ class OperatorLibrary:
                 f"input dimensions ({len(in_dims)})"
             )
         aligned_dims = [self._lit_nat(1)] * (len(repeats) - len(in_dims)) + in_dims
+        if len(aligned_dims) != len(in_dims):
+            x = self.reshape(x, aligned_dims)
         repeat_defs = [
             value if isinstance(value, mim.Def) else self._lit_nat(value)
             for value in repeats
@@ -4042,13 +3827,7 @@ class OperatorLibrary:
         if len(prepend_dims) != rank_val:
             raise ValueError("torch.diff prepend rank must match input rank")
 
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(input_dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and input_dims:
-            physical_axes = [len(input_dims) - 1]
+        physical_axes = list(range(len(input_dims)))
         if canonical_dim not in physical_axes:
             raise NotImplementedError("torch.diff over a folded singleton axis")
         physical_input_dims = [input_dims[axis] for axis in physical_axes]
@@ -4098,13 +3877,7 @@ class OperatorLibrary:
         canonical_dim = dim + rank_val if dim < 0 else dim
         if canonical_dim < 0 or canonical_dim >= rank_val:
             raise ValueError(f"cumsum dim {dim} is out of range for rank {rank_val}")
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and dims:
-            physical_axes = [len(dims) - 1]
+        physical_axes = list(range(len(dims)))
         if canonical_dim not in physical_axes:
             if boolean_input:
                 raise NotImplementedError("boolean cumsum over a folded singleton axis")
@@ -4159,11 +3932,7 @@ class OperatorLibrary:
                 "exclusive cumsum dtype conversion is not implemented"
             )
         dims = self.shape_of(input)
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(dims)))
         physical_dims = [dims[axis] for axis in physical_axes]
         if len(physical_dims) != 2 or logical_dim not in physical_axes:
             raise NotImplementedError(
@@ -4187,13 +3956,7 @@ class OperatorLibrary:
         canonical_dim = dim + rank if dim < 0 else dim
         if canonical_dim < 0 or canonical_dim >= rank:
             raise ValueError(f"cumprod dim {dim} is out of range for rank {rank}")
-        physical_axes = [
-            axis
-            for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
-        if not physical_axes and dims:
-            physical_axes = [rank - 1]
+        physical_axes = list(range(len(dims)))
         if canonical_dim not in physical_axes:
             return input
         physical_dims = [dims[axis] for axis in physical_axes]
@@ -4661,10 +4424,11 @@ class OperatorLibrary:
             tensors = [tensors.proj(num_inputs, i) for i in range(num_inputs)]
 
         input_dims_list = [self.shape_of(t) for t in tensors]
+        unit = self.world.sigma([])
         ordinary = [
             (tensor, dims)
             for tensor, dims in zip(tensors, input_dims_list)
-            if not (len(dims) == 1 and self._is_lit_nat_value(dims[0], 0))
+            if not (len(dims) == 1 and self._is_lit_nat_value(dims[0], 0)) and tensor.type() != unit
         ]
         if ordinary:
             tensors = [tensor for tensor, _ in ordinary]
@@ -4788,10 +4552,7 @@ class OperatorLibrary:
             logical_permutation[axis1],
             logical_permutation[axis0],
         )
-        physical_axes = [
-            axis for axis, extent in enumerate(dims)
-            if not self._is_lit_nat_value(extent, 1)
-        ]
+        physical_axes = list(range(len(dims)))
         physical_dims = [dims[axis] for axis in physical_axes]
         physical_rank = self._lit_nat(len(physical_dims))
         if axis0 in physical_axes and axis1 in physical_axes:

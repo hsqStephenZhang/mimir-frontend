@@ -15,11 +15,7 @@ def make_symbolic_tensor_input(world: mim.World, dims, elem_type=None):
     ops = FXGraphTranslator(world).ops
     if elem_type is None:
         elem_type = ops.F32
-    if len(dims) == 1:
-        tensor_ty = world.arr(dims[0], elem_type)
-    else:
-        tensor_ty = world.arr(world.tuple(dims), elem_type)
-    return world.mut_con(tensor_ty).var()
+    return world.mut_con(ops.tensor_type(list(dims), elem_type)).var()
 
 
 def lit_nat_value(dim: mim.Def):
@@ -165,7 +161,7 @@ def test_slice_preserves_unsliced_symbolic_dims_but_loses_sliced_dynamic_extent(
 
     assert_dims_same(ops, dims[0], n)
     assert_dims_not_same(ops, dims[1], m)
-    assert dims[1] == world.top_nat()
+    assert dims[1] == world.top(world.type_nat())
     assert_dim_is_literal(dims[2], 8)
 
 # select (n, m, 8) -> (n, 8)

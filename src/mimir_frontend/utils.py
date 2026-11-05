@@ -10,6 +10,7 @@ import mim
 import torch
 from torch import fx
 from mim._plugins.compile import compile as mim_compile
+from mim._plugins.tensor import tensor as mim_tensor
 
 from .translator import FXGraphTranslator
 
@@ -78,9 +79,9 @@ def shape_to_mimir_dims(
                     raise ValueError("shape_env is required when symbolic=True")
                 dims.append(shape_env.symbol_def(dim))
             else:
-                dims.append(world.top_nat())
+                dims.append(world.top(world.type_nat()))
         else:
-            dims.append(world.top_nat())
+            dims.append(world.top(world.type_nat()))
     return dims
 
 
@@ -93,11 +94,13 @@ def tensor_type_from_shape(
     symbolic: bool = False,
 ) -> mim.Def:
     dims = shape_to_mimir_dims(world, shape, shape_env=shape_env, symbolic=symbolic)
-    if not dims:
-        return elem_type
-    if len(dims) == 1:
-        return world.arr(dims[0], elem_type)
-    return world.arr(world.tuple(dims), elem_type)
+    # A zero-extent tensor has no storage and cannot be bufferized; it crosses the boundary as the unit value.
+    if any(isinstance(dim, mim.Lit) and dim.get_nat() == 0 for dim in dims):
+        return world.sigma([])
+    callee = world.annex(mim_tensor.Tensor.value)
+    callee = world.app(callee, _lit_nat(world, len(dims)))
+    callee = world.app(callee, world.tuple(dims))
+    return world.app(callee, elem_type)
 
 
 def _infer_input_shapes_from_placeholders(graph: fx.Graph) -> list[Shape]:
@@ -157,7 +160,7 @@ def _temporary_cwd():
 def _write_def_to_string(defn: mim.Def, name: str, max_depth: int) -> str:
     with _temporary_cwd() as tmp_dir:
         path = tmp_dir / f"{name}.mim"
-        defn.write(mim.Dump.Scope, str(path))
+        defn.write(mim.DefDump.Scope, str(path))
         return path.read_text()
 
 
@@ -182,10 +185,6 @@ def _compile_phases(world: mim.World, loop: bool, phases: Sequence[mim.Def]) -> 
 
 def _cond_phase(world: mim.World, plugin_name: str, phase: mim.Def) -> mim.Def:
     return world.call(mim_compile.cond, _mimir_i8_string(world, plugin_name), phase)
-
-
-def _unload_phase(world: mim.World, plugin_name: str) -> mim.Def:
-    return world.call(mim_compile.unload, _mimir_i8_string(world, plugin_name))
 
 
 def _default_compile_phase(world: mim.World) -> mim.Def:
@@ -236,7 +235,6 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
         [
             optimize,
             _named_phase(world, "regex.lower_regex"),
-            _unload_phase(world, "regex"),
             _named_phase(world, "torch.lower_torch"),
             # Torch implementations expose static option matches and runtime
             # guards. Normalize them while their values still have tensor types.
@@ -245,30 +243,23 @@ def _default_compile_phase(world: mim.World) -> mim.Def:
             world.annex(mim_compile.cleanup.value),
             _named_phase(world, "tensor.lower_tensor"),
             _named_phase(world, "tensor.lower_to_mem"),
-            _unload_phase(world, "tensor"),
             _cond_phase(world, "tensor", _named_phase(world, "mem.add_mem")),
             _named_phase(world, "btensor.lower_map_reduce"),
-            _unload_phase(world, "btensor"),
             _named_phase(world, "gpu.mem_checks"),
             _named_phase(world, "autodiff.eval"),
             _named_phase(world, "autodiff.zero_repl"),
-            _unload_phase(world, "autodiff"),
             _named_phase(world, "buffer.lower_ptr"),
-            _unload_phase(world, "buffer"),
             _named_phase(world, "affine.lower_index"),
             _named_phase(world, "cps.conv"),
-            _unload_phase(world, "cps"),
             _named_phase(world, "affine.lower_for"),
-            _unload_phase(world, "affine"),
             _cond_phase(world, "clos", clos_phases),
             world.annex(mim_compile.lam_spec.value),
             optimize,
-            world.annex(mim_compile.branch_normalize.value),
+            world.annex(mim_compile.dispatch_normalize.value),
             world.annex(mim_compile.ret_wrap.value),
             _named_phase(world, "mem.remem_repl"),
             _named_phase(world, "mem.alloc2malloc_repl"),
             _named_phase(world, "refly.remove_dbg_repl"),
-            _unload_phase(world, "refly"),
             _named_phase(world, "gpu.check_addr_spaces_repl"),
             _named_phase(world, "runtime.ll_emit"),
         ],

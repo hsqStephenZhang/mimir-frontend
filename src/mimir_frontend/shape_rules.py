@@ -198,9 +198,9 @@ class ShapeRules:
                 out_size = (s_in_val - start + step - 1) // step
                 out_shape[dim] = self.world.lit(self.world.lit_nat_0().type(), max(0, int(out_size)))
             else:
-                out_shape[dim] = self.world.top_nat()
+                out_shape[dim] = self.world.top(self.world.type_nat())
         else:
-            out_shape[dim] = self.world.top_nat()
+            out_shape[dim] = self.world.top(self.world.type_nat())
         return out_shape
 
     def concat_shape(self, shapes: list[list[mim.Def]], dim: int) -> list[mim.Def]:
@@ -225,7 +225,7 @@ class ShapeRules:
         if is_fully_static:
             out_shape[dim] = self.world.lit(self.world.lit_nat_0().type(), concat_dim_extent_val)
         else:
-            out_shape[dim] = self.world.top_nat()
+            out_shape[dim] = self.world.top(self.world.type_nat())
         return out_shape
 
     def transpose_shape(self, in_shape: list[mim.Def], permutation: list[int]) -> list[mim.Def]:

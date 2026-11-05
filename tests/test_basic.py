@@ -19,16 +19,12 @@ def make_world() -> mim.World:
 
 
 def make_tensor_type(world: mim.World, elem_type, shape_kind, rank) -> mim.Def:
+    ops = FXGraphTranslator(world).ops
     if shape_kind == "dynamic":
         dims = [world.mut_con(world.type_nat()).var() for _ in range(rank)]
-        if rank == 1:
-            return world.arr(dims[0], elem_type)
-        return world.arr(world.tuple(dims), elem_type)
-
-    if rank == 1:
-        return world.arr(world.lit_nat(8), elem_type)
-    shape = world.tuple([world.lit_nat(i + 2) for i in range(rank)])
-    return world.arr(shape, elem_type)
+    else:
+        dims = [world.lit_nat(8)] if rank == 1 else [world.lit_nat(i + 2) for i in range(rank)]
+    return ops.tensor_type(dims, elem_type)
 
 
 def make_inputs(world: mim.World, count, shape_kind, rank) -> List[mim.Def]:
@@ -43,10 +39,7 @@ def make_static_inputs_with_shapes(world: mim.World, shapes, elem_type=None) -> 
         elem_type = ops.F32
     inputs = []
     for shape in shapes:
-        if len(shape) == 1:
-            tensor_ty = world.arr(world.lit_nat(shape[0]), elem_type)
-        else:
-            tensor_ty = world.arr(world.tuple([world.lit_nat(dim) for dim in shape]), elem_type)
+        tensor_ty = ops.tensor_type([world.lit_nat(dim) for dim in shape], elem_type)
         inputs.append(world.mut_con(tensor_ty).var())
     return inputs
 
@@ -60,7 +53,7 @@ def translate_model(model, inputs):
 def def_to_string(defn):
     with tempfile.TemporaryDirectory() as tmp_dir:
         path = Path(tmp_dir) / "def.mim"
-        defn.write(mim.Dump.Scope, str(path))
+        defn.write(mim.DefDump.Scope, str(path))
         return path.read_text()
 
 
@@ -80,29 +73,18 @@ def assert_translates_for_all_shapes(model_factory, input_count):
             assert isinstance(result, mim.Def)
 
 
+def _tensor_type_parts(tensor_def):
+    return FXGraphTranslator(tensor_def.world()).ops.tensor_type_parts(tensor_def.type())
+
+
 def tensor_element_type(tensor_def):
-    tensor_type = tensor_def.type()
-    while isinstance(tensor_type, mim.Seq):
-        tensor_type = tensor_type.body()
-    return tensor_type
-
-
-def seq_axes(seq):
-    """A Seq fuses all its axes into one node; Def.arity only yields the outermost."""
-    shape = seq.shape()
-    return [shape.proj(shape.num_projs(), i) for i in range(shape.num_projs())]
+    parts = _tensor_type_parts(tensor_def)
+    return tensor_def.type() if parts is None else parts[1]
 
 
 def tensor_shape(tensor_def: mim.Def):
-    dims = []
-    tensor_type = tensor_def.type()
-    while isinstance(tensor_type, mim.Seq):
-        axes = seq_axes(tensor_type)
-        if not axes:
-            break
-        dims.extend(axes)
-        tensor_type = tensor_type.body()
-    return dims
+    parts = _tensor_type_parts(tensor_def)
+    return [] if parts is None else parts[0]
 
 
 def tensor_shape_values(tensor_def: mim.Def):
@@ -116,11 +98,7 @@ def make_symbolic_tensor_input(world: mim.World, dims, elem_type=None):
     ops = FXGraphTranslator(world).ops
     if elem_type is None:
         elem_type = ops.F32
-    if len(dims) == 1:
-        tensor_ty = world.arr(dims[0], elem_type)
-    else:
-        tensor_ty = world.arr(world.tuple(dims), elem_type)
-    return world.mut_con(tensor_ty).var()
+    return world.mut_con(ops.tensor_type(list(dims), elem_type)).var()
 
 
 def assert_translates_to_element_type_for_all_shapes(model_factory, input_count, element_type_fn):
@@ -334,7 +312,7 @@ def test_same_dim_rejects_symbol_and_top_nat():
     ops = FXGraphTranslator(world).ops
     n = world.mut_con(world.type_nat()).var()
 
-    assert not ops.rules._same_dim(n, world.top_nat())
+    assert not ops.rules._same_dim(n, world.top(world.type_nat()))
 
 
 def test_same_shape_dims_accepts_shared_symbolic_shape():
@@ -927,7 +905,7 @@ def test_transpose_moves_folded_singleton_across_physical_axes():
     result = translate_model(Model(), [x])
 
     assert tensor_shape_values(result) == [3, 4, 2, 5]
-    assert "torch.shape.permute" in def_to_string(result)
+    assert "torch.shape.transpose_int" in def_to_string(result)
 
 
 def test_qwen_exact_unsafe_view_overload_is_registered():
@@ -986,8 +964,7 @@ def test_softmax_maps_logical_axes_across_folded_singletons(dim):
     result = translator.translate(traced.graph, [x])
 
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [2, 1, 4]
-    expected_op = "torch.creation.full" if dim == 1 else "torch.normalization.softmax"
-    assert expected_op in def_to_string(result)
+    assert "torch.normalization.softmax" in def_to_string(result)
 
 
 class _FlipDimension(torch.nn.Module):
@@ -1363,7 +1340,6 @@ def test_adaptive_avg_pool2d_folded_singletons_is_identity():
     translator.ops._remember_shape(input_def, shape)
     result = translator.translate(traced.graph, [input_def])
 
-    assert result == input_def
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 1, 1]
 
 
@@ -1448,7 +1424,7 @@ def test_functional_batch_norm_inference_translates():
         translator.ops._remember_shape(input_def, shape)
     result = translator.translate(traced.graph, inputs)
 
-    assert tensor_shape_values(result) == [4, 8, 8]
+    assert tensor_shape_values(result) == [1, 4, 8, 8]
     assert [dim.get_nat() for dim in translator.ops.shape_of(result)] == [1, 4, 8, 8]
     assert "torch.normalization.batch_norm" in def_to_string(result)
 
@@ -1786,7 +1762,7 @@ def test_convolution_batch_one_result_can_feed_next_convolution():
         translator.ops._remember_shape(inp, shape)
     result = translator.translate(traced.graph, inputs)
 
-    assert tensor_shape_values(result) == [5, 8, 8]
+    assert tensor_shape_values(result) == [1, 5, 8, 8]
     assert_ir_contains_in_order(
         def_to_string(result),
         ["torch.conv.general", "torch.activation.relu", "torch.conv.general"],
@@ -2466,7 +2442,7 @@ def test_adaptive_avg_pool1d_uses_torch_semantics():
     x = make_static_inputs_with_shapes(world, [(2, 3, 8)])[0]
     result = translate_model(Model(), [x])
 
-    assert tensor_shape_values(result) == [2, 3]
+    assert tensor_shape_values(result) == [2, 3, 1]
     # Global 1-D adaptive pooling is decomposed to mean over the spatial axis;
     # this avoids a singleton dependent shape that MimIR normalizes away.
     assert "torch.pool.adaptive_avg_pool1d" not in def_to_string(result)
@@ -2487,9 +2463,7 @@ def test_adaptive_avg_pool3d_global_pool_uses_torch_semantics():
     x = make_static_inputs_with_shapes(world, [(2, 3, 4, 5, 6)])[0]
     result = translate_model(Model(), [x])
 
-    # Literal-one nested array axes normalize away in the physical MimIR type;
-    # the frontend shape cache and FX output metadata preserve logical NC111.
-    assert tensor_shape_values(result) == [2, 3]
+    assert tensor_shape_values(result) == [2, 3, 1, 1, 1]
     assert "torch.pool.adaptive_avg_pool3d" not in def_to_string(result)
 
 
@@ -2795,7 +2769,7 @@ def test_dim_extrema_folded_singleton_axis_is_static(kind):
 
     assert [dim.get_nat() for dim in ops.shape_of(values)] == [2, 3]
     assert [dim.get_nat() for dim in ops.shape_of(indices)] == [2, 3]
-    assert "torch.creation.full" in def_to_string(indices)
+    assert f"torch.reduction.{kind}_dim" in def_to_string(indices)
 
 @pytest.mark.parametrize("shape_kind", ["static", "dynamic"])
 @pytest.mark.parametrize("rank,dim,keepdim", [(3, -1, True), (3, (1, 2), True)])
@@ -2892,7 +2866,7 @@ def test_var_mean_folded_singleton_axis_uses_unit_reduction():
     result = ops.var_mean(x, dim=1, correction=1)
 
     ir = "\n".join(def_to_string(item) for item in result)
-    assert "torch.reduction.var_mean_singletons" in ir
+    assert "torch.reduction.var_mean" in ir
 
 
 @pytest.mark.parametrize("dtype", [None, torch.float32])
