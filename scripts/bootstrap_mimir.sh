@@ -20,6 +20,8 @@ fetch_plugin runtime https://github.com/hsqStephenZhang/mimir-runtime-plugin.git
 if [[ ! -d "${ROOT_DIR}/.venv" ]]; then
     uv venv --python 3.14
 fi
+# MimIR's binding generator needs clang.cindex before the project (and its mim path dependency) can be synced.
+uv pip install -q libclang
 
 if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
     PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
