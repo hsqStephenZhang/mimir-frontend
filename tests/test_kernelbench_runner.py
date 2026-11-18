@@ -368,3 +368,37 @@ def test_memory_limit_ignores_unsupported_macos_rlimit(monkeypatch):
     )
 
     runner.apply_memory_limit(4)
+
+
+def test_dynamo_trace_is_time_until_the_backend_was_entered(monkeypatch):
+    monkeypatch.setattr(runner, "last_backend_entry", lambda: 12.5)
+    assert runner.dynamo_trace_since(10.0) == 2.5
+    monkeypatch.setattr(runner, "last_backend_entry", lambda: None)
+    assert runner.dynamo_trace_since(10.0) is None
+    monkeypatch.setattr(runner, "last_backend_entry", lambda: 9.0)  # stale: before the call
+    assert runner.dynamo_trace_since(10.0) is None
+
+
+def test_run_case_without_mlir_emission(tmp_path: Path):
+    """Without `--emit-mlir` (`mlir=None`) a case still compiles and records Dynamo's tracing time."""
+    case = {
+        "kernel": "level1/add_relu.py",
+        "fixture": "yaml",
+        "scalable": False,
+        "init_args": [],
+        "input_shapes": ["4x8", "4x8"],
+        "initializations": ["rnd", "rnd"],
+    }
+    model = tmp_path / "third_party/KernelBench/KernelBench/level1/add_relu.py"
+    model.parent.mkdir(parents=True)
+    model.write_text(
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def forward(self, x, y): return torch.relu(x + y)\n"
+    )
+    timings: dict[str, float] = {}
+
+    runner.run_case(case, tmp_path, 16, None, timings)
+
+    assert "dynamo_trace" in timings
+    assert "mlir_dynamo_trace" not in timings

@@ -3,5 +3,5 @@
 	url = https://github.com/ScalingIntelligence/KernelBench
 [submodule "MimIR"]
 	path = MimIR
-	url = https://github.com/hsqStephenZhang/MimIR.git
-branch = frontend-dev
+	url = https://github.com/HarithF/mimir.git
+branch = gpu-device-concat

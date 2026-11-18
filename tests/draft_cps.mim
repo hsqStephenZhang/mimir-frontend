@@ -1,3 +1,0 @@
-fun extern my_cps_module (_35501: %math.F (23, 8)): %math.F (23, 8) =
-    _35502 _35501;
-

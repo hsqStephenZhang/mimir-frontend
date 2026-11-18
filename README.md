@@ -7,7 +7,7 @@ A PyTorch FX graph importer for MimIR.
 This project vendors its tested MimIR revision as a submodule. Clone with submodules:
 
 ```bash
-git clone --recursive git@github.com:hsqStephenZhang/mimir-frontend.git
+git clone --recursive git@github.com:HarithF/mimir-frontend.git
 cd mimir-frontend
 ```
 
@@ -17,8 +17,15 @@ Then build the local MimIR Python binding and sync the Python environment:
 ./scripts/bootstrap_mimir.sh
 ```
 
-The script initializes recursive submodules, creates a Python 3.14 `uv` venv,
-builds MimIR's `mim_py` target, and runs `uv sync`.
+The script initializes recursive submodules, clones the MimIR plugins the
+frontend needs into `MimIR/extra/`, creates a Python 3.14 `uv` venv, builds
+MimIR's `mim_py` target, and runs `uv sync`. The plugins are the torch dialect
+from [`HarithF/mimir-torch-plugin`](https://github.com/HarithF/mimir-torch-plugin)
+(branch `art-eval`, which lowers grouped convolutions to `tensor.conv_grouped`)
+and the runtime checks from
+[`hsqStephenZhang/mimir-runtime-plugin`](https://github.com/hsqStephenZhang/mimir-runtime-plugin)
+(branch `feat/ll-emit`); `MIMIR_TORCH_PLUGIN_URL`, `MIMIR_TORCH_PLUGIN_REF` and
+`MIMIR_RUNTIME_PLUGIN_REF` override them.
 
 MimIR needs a C++23 toolchain (`<print>` must compile). On macOS use Homebrew
 LLVM rather than Apple clang, whose Command Line Tools can ship incomplete
@@ -87,6 +94,44 @@ fixed-point options, loaded plugins, cache/fingerprint identifiers, generated
 artifacts, and success or failure diagnostics. It deliberately excludes tensor
 values and model weights.
 
+## Emitting MLIR
+
+`scripts/bootstrap_mimir.sh` also clones the out-of-tree
+[`mim_mlir`](https://github.com/HarithF/mim_mlir) plugin into
+`MimIR/extra/mim_mlir` (branch `mimir-frontend-dev`, the plugin ported to the
+pinned MimIR's nominal tensors; set `MIM_MLIR_SKIP=1` to build without it). It
+turns tensor-level MimIR into `linalg`/`tensor`/`scf`/`arith`/`math` MLIR on
+tensors.
+
+```python
+compiled = torch.compile(model, backend="mimir", options={
+    "debug_dir": "dbg/",
+    "emit_only": "mlir",     # only write <graph>.mlir; 
+})
+```
+
+The MLIR pipeline (`install_mlir_compile_phase`) is deliberately light: it lowers
+the Torch axioms and `%tensor.lower_tensor`, then emits. No partial-evaluation
+fixpoint, fusion, or lowering runs; those are left to MLIR. 
+Recurrent modules (`%tensor.scan`) become an `scf.for` carrying the
+output and state tensors, to be bufferized with `allow-return-allocs-from-loops`.
+
+KernelBench sweeps can emit both targets per model:
+
+```bash
+uv run --no-sync python scripts/run_kernelbench_mimir.py \
+    --suite level3 --size-divisor 1 --emit-mlir out/        # LLVM check + .ll and .mlir
+uv run --no-sync python scripts/run_kernelbench_mimir.py \
+    --suite level3 --size-divisor 1 --emit-mlir out/ --mlir-only
+```
+
+`--size-divisor 1` still applies the hand-written overlays in
+`scripts/kernelbench_fixtures/level3.yaml`, which shrink 26 level-3 models. For
+the shapes written in the KernelBench sources, point `--fixtures` at an empty
+directory.
+
+Emitted modules are verified with `mlir-opt` when it is on PATH.
+
 ## Running Tests
 
 Use `uv run --no-sync pytest -q` after bootstrap:
@@ -139,16 +184,14 @@ uv run --no-sync python scripts/run_kernelbench_mimir.py --suite level1 \
   JSON.
 
 Expected coverage at `--size-divisor 16` is 100/100 on Level 1 and 99/100 on
-Level 2; the remaining Level 2 failure is documented in
-`docs/kernelbench_level2_report.md`. Level 3 and 4 details are in the
-other `docs/kernelbench_level*_report.md` files.
+Level 2 (case 28 is a known lowering defect).
 
 ## Fresh Clone Smoke Test
 
 The expected mentor workflow is:
 
 ```bash
-git clone --recursive git@github.com:hsqStephenZhang/mimir-frontend.git
+git clone --recursive git@github.com:HarithF/mimir-frontend.git
 cd mimir-frontend
 ./scripts/bootstrap_mimir.sh
 uv run --no-sync python -c 'import mim; print("mim import ok")'
@@ -177,7 +220,3 @@ Currently supports:
 - `torch.relu`
 - Basic shape propagation
 
-TODO:
-- Comprehensive `reduce_sum` implementation.
-- `pooling` (pad + reduce + elementwise).
-- Dynamic shape handling refinements.

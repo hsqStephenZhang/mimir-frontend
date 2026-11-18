@@ -307,6 +307,15 @@ def test_lighthouse_constant_pad_matches_eager():
     check_against_eager(ConstantPad(), torch.randn(2, 3, 4, 7))
 
 
+def test_functional_pad_matches_eager():
+    # Dynamo records `F.pad` under its C builtin `torch._C._nn.pad` (Swin's shifted windows).
+    class FunctionalPad(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.pad(x, [0, 0, 1, 2, 2, 1], "constant", 0) * 2
+
+    check_against_eager(FunctionalPad(), torch.randn(2, 5, 6, 3))
+
+
 def test_lighthouse_cumprod_matches_eager():
     class Cumprod(torch.nn.Module):
         def forward(self, x):
@@ -1775,6 +1784,19 @@ def test_debug_manifest_records_stage_timings(tmp_path):
     assert timings["total"] >= stages
     assert backend_module.last_compile_timings() == timings
 
+
+
+def test_last_backend_entry_marks_when_dynamo_hands_over_the_graph(tmp_path):
+    """The time between calling the compiled model and this mark is Dynamo's tracing."""
+    import time
+
+    compiled = torch.compile(LinearMLP(), backend="mimir", options={"cache": False})
+    before = time.perf_counter()
+    with torch.no_grad():
+        compiled(torch.randn(4, 16))
+    after = time.perf_counter()
+    entry = backend_module.last_backend_entry()
+    assert entry is not None and before < entry < after
 
 def test_debug_manifest_records_fixed_point_failure(tmp_path):
     compiled = torch.compile(

@@ -45,12 +45,11 @@ def test_policy_selection_is_explicit():
 
 
 def test_policy_does_not_retrace_a_graph_without_a_fallback_trigger():
-    gm = make_fx(lambda x: torch.nn.functional.layer_norm(x, (4,)))(
-        torch.randn(2, 4)
+    gm = make_fx(lambda x: torch.nn.functional.layer_norm(x, (4,)))(torch.randn(2, 4))
+    assert (
+        apply_decomposition_policy(gm, [torch.randn(2, 4)], MIMIR_DECOMPOSITION_POLICY)
+        is gm
     )
-    assert apply_decomposition_policy(
-        gm, [torch.randn(2, 4)], MIMIR_DECOMPOSITION_POLICY
-    ) is gm
 
 
 def test_mimir_policy_retraces_python_multihead_attention_to_aten():
@@ -79,9 +78,7 @@ def test_mimir_policy_decomposes_cpu_scaled_dot_product_attention():
     inputs = [torch.randn(2, 4, 8, 16) for _ in range(3)]
     gm = torch.fx.symbolic_trace(attention)
 
-    lowered = apply_decomposition_policy(
-        gm, inputs, MIMIR_DECOMPOSITION_POLICY
-    )
+    lowered = apply_decomposition_policy(gm, inputs, MIMIR_DECOMPOSITION_POLICY)
     targets = _targets(lowered)
 
     assert torch.nn.functional.scaled_dot_product_attention not in targets
@@ -92,3 +89,19 @@ def test_mimir_policy_decomposes_cpu_scaled_dot_product_attention():
     assert torch.ops.aten._safe_softmax.default not in targets
     assert torch.ops.aten.bmm.default in targets
     assert torch.ops.aten._softmax.default in targets
+
+
+def test_retrace_keeps_placeholder_names():
+    def model(l_x_, l_self_modules_fc_parameters_weight_):
+        return torch.nn.functional.hardswish(
+            l_x_ @ l_self_modules_fc_parameters_weight_
+        )
+
+    inputs = [torch.randn(2, 4), torch.randn(4, 3)]
+    gm = torch.fx.symbolic_trace(model)
+    lowered = apply_decomposition_policy(gm, inputs, MIMIR_DECOMPOSITION_POLICY)
+
+    assert lowered is not gm  # hardswish triggers the retrace
+    names = [n.name for n in lowered.graph.nodes if n.op == "placeholder"]
+    assert names == ["l_x_", "l_self_modules_fc_parameters_weight_"]
+    torch.testing.assert_close(lowered(*inputs), model(*inputs))

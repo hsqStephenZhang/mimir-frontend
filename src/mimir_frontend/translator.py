@@ -212,6 +212,7 @@ class FXGraphTranslator:
         m["unsqueeze"] = self._wrap_unsqueeze()
         m["aten.unsqueeze.default"] = self._wrap_unsqueeze()
         m[torch.nn.functional.pad] = self._wrap_pad()
+        m[torch._C._nn.pad] = self._wrap_pad()  # what Dynamo records for `F.pad`
         m["aten.pad.default"] = self._wrap_pad()
         m["contiguous"] = self._wrap_contiguous()
         m["aten.contiguous.default"] = self._wrap_contiguous()

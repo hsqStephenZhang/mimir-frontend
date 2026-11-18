@@ -81,4 +81,15 @@ def apply_decomposition_policy(
         for node in gm.graph.nodes
     ):
         return gm
-    return make_fx(gm, decomposition_table=table)(*example_inputs)
+    traced = make_fx(gm, decomposition_table=table)(*example_inputs)
+    # make_fx renames every placeholder to `arg<i>_1`. Restore the original
+    # (Dynamo) names: they become the MimIR function's argument names, which
+    # downstream tooling uses to bind weights by name.
+    original = [n.name for n in gm.graph.nodes if n.op == "placeholder"]
+    retraced = [n for n in traced.graph.nodes if n.op == "placeholder"]
+    if len(original) == len(retraced):
+        for node, name in zip(retraced, original, strict=True):
+            node.target = name
+            node._rename(name)
+        traced.recompile()
+    return traced

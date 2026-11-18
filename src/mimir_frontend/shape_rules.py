@@ -14,8 +14,8 @@ class ReduceShapeSpec:
 
 class ShapeRules:
     """
-    Centralized Shape Invariants and Transformation Rules.
-    This class implements the shape logic described in shape_invariants.md.
+    Centralized shape rules: tracks PyTorch's logical shape next to the MimIR type,
+    since MimIR folds singleton axes while transpose, keepdim and broadcast count logical ranks.
     """
     def __init__(self, world: mim.World):
         self.world = world

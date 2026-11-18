@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import argparse
 import ast
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import importlib.util
 import json
 import os
 from pathlib import Path
 import resource
+import shutil
 import subprocess
 import sys
 import time
@@ -21,7 +22,7 @@ from typing import Any
 import torch
 import yaml
 
-from mimir_frontend.backend import last_compile_timings, mimir_backend
+from mimir_frontend.backend import last_backend_entry, last_compile_timings, mimir_backend
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -84,6 +85,9 @@ class CaseResult:
     elapsed_seconds: float
     detail: str = ""
     timings: dict[str, float] = field(default_factory=dict)
+    # MLIR emission status when run with --emit-mlir: "", "PASS", or "FAIL".
+    mlir_status: str = ""
+    mlir_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -342,18 +346,95 @@ def prepare_case(
     return model, inputs
 
 
+@dataclass
+class MlirEmit:
+    """Per-case `--emit-mlir` settings; `status`, `detail` and `trace` receive the outcome."""
+
+    out_dir: Path
+    mlir_opt: str | None
+    only: bool
+    status: str = ""
+    detail: str = ""
+    trace: float | None = None  # Dynamo's tracing time for the emit, in seconds
+
+
+def dynamo_trace_since(started: float) -> float | None:
+    """Seconds from `started` (calling the compiled model) until the backend got the graph."""
+    entry = last_backend_entry()
+    return entry - started if entry is not None and entry >= started else None
+
+
+_dynamo_warm = False
+
+
+def warm_up_dynamo() -> None:
+    """Pay Dynamo's one-time start-up cost once per process, so it is not part of
+    the first model's tracing time."""
+    global _dynamo_warm
+    if not _dynamo_warm:
+        torch.compile(lambda x: x + 1, backend="eager", fullgraph=True)(torch.ones(1))
+        torch._dynamo.reset()
+        _dynamo_warm = True
+
+
+def verify_mlir(path: Path, mlir_opt: str | None) -> None:
+    """Parse and verify one emitted module with `mlir-opt`, when available."""
+    if mlir_opt is None:
+        return
+    child = subprocess.run([mlir_opt, str(path), "-o", os.devnull], capture_output=True, text=True)
+    if child.returncode != 0:
+        raise RuntimeError(f"mlir-opt rejected {path.name}: {child.stderr.strip()[:2000]}")
+
+
+def emit_mlir(model, inputs, max_fp_iters: int | None, mlir: MlirEmit) -> None:
+    """Emit (and verify) `<graph>.mlir` for every Dynamo graph of `model`."""
+    mlir.out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in mlir.out_dir.glob("*.mlir"):
+        stale.unlink()
+    options: dict[str, Any] = {"debug_dir": str(mlir.out_dir), "emit_only": "mlir"}
+    if max_fp_iters:
+        options["max_fp_iters"] = max_fp_iters
+    torch._dynamo.reset()
+    warm_up_dynamo()
+    try:
+        with torch.no_grad():
+            started = time.perf_counter()
+            torch.compile(model, backend=mimir_backend, fullgraph=True, dynamic=False, options=options)(*inputs)
+            mlir.trace = dynamo_trace_since(started)
+        emitted = sorted(mlir.out_dir.glob("*.mlir"))
+        if not emitted:
+            raise RuntimeError("no .mlir emitted")
+        for path in emitted:
+            verify_mlir(path, mlir.mlir_opt)
+    except Exception as exc:
+        mlir.status, mlir.detail = "FAIL", str(exc)[-4000:]
+    else:
+        mlir.status = "PASS"
+    finally:
+        torch._dynamo.reset()
+
+
 def run_case(
     case: dict[str, Any],
     lighthouse: Path | None,
     size_divisor: int,
     max_fp_iters: int | None,
     timings: dict[str, float],
+    mlir: MlirEmit | None = None,
 ) -> None:
     model, inputs = timed_call(
         timings,
         "prepare",
         lambda: prepare_case(case, lighthouse, size_divisor),
     )
+    case_fp_iters = case.get("max_fp_iters", max_fp_iters)
+    if mlir is not None and mlir.only:
+        timed_call(timings, "mlir", lambda: emit_mlir(model, inputs, case_fp_iters, mlir))
+        if mlir.trace is not None:
+            timings["mlir_dynamo_trace"] = mlir.trace
+        if mlir.status == "FAIL":
+            raise PhaseError("mlir", RuntimeError(mlir.detail))
+        return
     with torch.no_grad():
         try:
             expected = timed_call(
@@ -363,9 +444,15 @@ def run_case(
             )
         except Exception as exc:
             raise InvalidCaseError(f"eager fixture failed: {exc}") from exc
+        if mlir is not None:
+            timed_call(timings, "mlir", lambda: emit_mlir(model, inputs, case_fp_iters, mlir))
+            if mlir.trace is not None:
+                timings["mlir_dynamo_trace"] = mlir.trace
         try:
-            case_fp_iters = case.get("max_fp_iters", max_fp_iters)
-            options = {"max_fp_iters": case_fp_iters} if case_fp_iters else None
+            options: dict[str, Any] = {"max_fp_iters": case_fp_iters} if case_fp_iters else {}
+            if mlir is not None:
+                # Keep the emitted `.ll` (and MimIR dumps) next to the `.mlir`.
+                options["debug_dir"] = str(mlir.out_dir)
             # InstanceNorm emits a warning for singleton spatial inputs. Dynamo
             # can preserve this logging side effect by treating warnings.warn
             # as reorderable, instead of breaking the graph before the backend.
@@ -383,11 +470,16 @@ def run_case(
             )
             # torch.compile is lazy: MimIR lowering and JIT happen here, on the
             # first call, together with that call's execution.
+            warm_up_dynamo()
+            started = time.perf_counter()
             actual = timed_call(
                 timings,
                 "compile_execute",
                 lambda: compiled(*inputs),
             )
+            trace = dynamo_trace_since(started)
+            if trace is not None:
+                timings["dynamo_trace"] = trace
             for stage, seconds in (last_compile_timings() or {}).items():
                 timings[f"backend_{stage}"] = seconds
         except Exception as exc:
@@ -411,12 +503,13 @@ def run_case(
 
 
 def execute_direct(
-    case: dict[str, Any], lighthouse: Path | None, size_divisor: int, max_fp_iters: int | None
+    case: dict[str, Any], lighthouse: Path | None, size_divisor: int, max_fp_iters: int | None,
+    mlir: MlirEmit | None = None,
 ) -> CaseResult:
     started = time.monotonic()
     timings: dict[str, float] = {}
     try:
-        run_case(case, lighthouse, size_divisor, max_fp_iters, timings)
+        run_case(case, lighthouse, size_divisor, max_fp_iters, timings, mlir)
     except InvalidCaseError as exc:
         return CaseResult(
             case["kernel"],
@@ -545,7 +638,31 @@ def main() -> int:
         help="cap MimIR fixed-point iterations; use 0 for the compiler default",
     )
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument(
+        "--emit-mlir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "also emit MLIR through the mlir plugin; each case keeps its .ll "
+            "and .mlir under DIR/<model>/ and gets a separate mlir_status"
+        ),
+    )
+    parser.add_argument(
+        "--mlir-only",
+        action="store_true",
+        help="with --emit-mlir: skip the LLVM compile/compare and only emit (and verify) MLIR",
+    )
+    parser.add_argument(
+        "--mlir-opt",
+        default=shutil.which("mlir-opt"),
+        help="mlir-opt used to verify emitted MLIR (default: from PATH; '' disables)",
+    )
     args = parser.parse_args()
+    if args.emit_mlir is not None:
+        args.emit_mlir = args.emit_mlir.resolve()
+    mlir_opt = args.mlir_opt or None
+    if args.mlir_only and args.emit_mlir is None:
+        parser.error("--mlir-only requires --emit-mlir DIR")
 
     if args.suite == "ci":
         yaml_path = lighthouse_fixture_dir(args.lighthouse) / "ci.yaml"
@@ -608,7 +725,14 @@ def main() -> int:
             if debug_root := os.environ.get("MIMIR_DEBUG_DIR"):
                 # One dump directory per case, so profiles and manifests can be joined with results.
                 os.environ["MIMIR_DEBUG_DIR"] = str(Path(debug_root) / Path(name).stem)
-            result = execute_direct(case, args.lighthouse, args.size_divisor, args.max_fp_iters)
+            mlir = None
+            if args.emit_mlir is not None:
+                mlir = MlirEmit(args.emit_mlir / Path(name).stem, mlir_opt, args.mlir_only)
+            result = execute_direct(case, args.lighthouse, args.size_divisor, args.max_fp_iters, mlir)
+            if mlir is not None:
+                result = replace(result, mlir_status=mlir.status, mlir_detail=mlir.detail)
+                if mlir.only and result.status == "PASS":
+                    result = replace(result, phase="mlir")
             print(RESULT_PREFIX + json.dumps(asdict(result)), flush=True)
         else:
             started = time.monotonic()
@@ -626,6 +750,10 @@ def main() -> int:
                 command.append("--fixture-only")
             for excluded_case in args.exclude_case:
                 command.extend(["--exclude-case", excluded_case])
+            if args.emit_mlir is not None:
+                command += ["--emit-mlir", str(args.emit_mlir), "--mlir-opt", mlir_opt or ""]
+                if args.mlir_only:
+                    command.append("--mlir-only")
             try:
                 child = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
                 marker = next(
@@ -660,6 +788,8 @@ def main() -> int:
                 )
         results = [old for old in results if old.kernel != name] + [result]
         print(f"  {result.status} [{result.phase}]: {result.detail}", flush=True)
+        if result.mlir_status:
+            print(f"  mlir {result.mlir_status}: {result.mlir_detail}", flush=True)
         if args.results_json:
             write_results(args.results_json, results)
         if args.fail_fast and result.status != "PASS":
@@ -674,7 +804,12 @@ def main() -> int:
         f"\n{coverage.passed}/{coverage.eligible} eligible cases passed "
         f"({coverage.pass_rate:.1%}); {coverage.invalid} invalid"
     )
-    return 0 if coverage.meets(args.min_pass_rate) else 1
+    ok = coverage.meets(args.min_pass_rate)
+    if args.emit_mlir is not None:
+        mlir_passed = sum(result.mlir_status == "PASS" for result in selected_results)
+        print(f"{mlir_passed}/{coverage.eligible} eligible cases emitted MLIR")
+        ok = ok and mlir_passed / max(coverage.eligible, 1) >= args.min_pass_rate
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
