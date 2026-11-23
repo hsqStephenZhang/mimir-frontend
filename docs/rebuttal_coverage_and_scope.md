@@ -7,11 +7,13 @@ supply, `[[CZ: …]]` a decision. Numbers were measured on 2026-11-23 unless a d
 
 ### Draft
 
-> **Coverage.** KernelBench Level 3 has 50 models. Figure 4 reports the 25 that ran through all three CPU
-> pipelines at submission. The front end has since improved: **45 of the 50 models now compile with MimIR at
-> full size** and match PyTorch eager execution (`rtol = atol = 1e-4`), which includes every model of Figure 4.
-> The revision extends Figure 4 by the models that also run through the reference pipeline: [[CZ: the 7 models
-> to add; candidates below]].
+> **Coverage.** KernelBench Level 3 has 50 models. Figure 4 reports a selection of 25 of them, those we ran
+> through all three CPU pipelines; the selection was not limited by MimIR. Rebuilt at the submission revision
+> (frontend `2f27ccd`, MimIR `3a31afcde`), **44 of the 50 models compile at full size** and match PyTorch eager
+> execution (`rtol = atol = 1e-4`); with the current revision it is **45 of 50**, the difference being
+> SwinTransformerV2, whose LLVM IR the runtime emitter used to rejects as a redefinition (fixed since). All 25
+> models of Figure 4 are among them. The revision extends Figure 4 by [[CZ: the 7 models to add]] of the other
+> 20, those for which the reference pipeline also runs.
 >
 > **Why the other 5 fail.** All five fail in the Python front end, before MimIR sees a program, because a
 > PyTorch target has no conversion yet: 32 ConvolutionalVisionTransformer uses the fused
@@ -34,7 +36,8 @@ supply, `[[CZ: …]]` a decision. Numbers were measured on 2026-11-23 unless a d
 | Fact | Value | Where |
 |---|---|---|
 | Models in KernelBench Level 3 | 50 | `KernelBench/level3` |
-| Compile and match eager, full size | 45 (90 %) | CI run 42060893472 (macOS), `docs/compile_time_level3.md` |
+| Compile and match eager, full size, now | 45 (90 %) | CI run 42060893472 (macOS), `docs/compile_time_level3.md` |
+| Same, at the submission revision (`feat/torch-plugin-new`) | 44 (88 %); only SwinTransformerV2 differs | rebuilt 2026-11-24, MimIR `3a31afcde`, torch plugin `d93b656`, runtime plugin `6dee9c5` |
 | Linux CI without memory-hungry models | 42/42 (ResNet101, DenseNet201, SwinV2 excluded by the 15 GB limit, not by failure) | same run |
 | Models in Figure 4 | 25, all among the 45 | paper Fig. 4 caption |
 | Compile but not in Figure 4 | 20 | list below |
@@ -54,12 +57,13 @@ EfficientNetB2, VisionTransformer, SwinMLP, SwinTransformerV2, VisionAttention, 
 LSTMCn, LSTMBidirectional, GRU, GRUHidden, GRUBidirectional, GRUBidirectionalHidden, MinGPTCausalAttention,
 MiniGPTBlock, UNetSoftmax, ReLUSelfAttention.
 
-### Open point
+### Open point: "the 7 models that now compile"
 
-"The 7 models that now compile" is ambiguous. If it means *models that compile now but did not when the paper
-was written*, the repository does not record the count at submission (the 2026-08-24 baseline reports 27 fixture
-cases, a different unit). If it means *models to add to Figure 4*, it needs the Torch-MLIR reference to run on
-them, which this repository cannot check. Either way, the 20 models above are the pool.
+The submission revision already compiles 44 models, so the 7 are **not** newly compilable models: they can only
+be models *added to Figure 4*. Which 7 depends on where the Torch-MLIR reference pipeline runs, which this
+repository cannot check; the pool is the 20 models above. Measured with the current harness, `--max-fp-iters 8192`
+(the limit that large models such as ResNet101 and DenseNet201 need; the submission-era default was lower),
+full size, M2 Pro; per-model detail in `/private/tmp/…/baseline-out/level3.json` of the session that produced it.
 
 ## Item 2 (C, D): scope the claims to static shapes
 
