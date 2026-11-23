@@ -87,6 +87,7 @@ import torch
 from torch import fx
 
 from .decomposition import apply_decomposition_policy, resolve_decomposition_policy
+from .symbols import is_sym_placeholder, placeholder_value, symbol_dim, symbol_names
 from .utils import build_model_function, install_execution_compile_phase
 
 # Dynamo intentionally keeps recurrent modules opaque unless this is enabled.
@@ -294,7 +295,7 @@ def _write_debug_manifest(path: Path, payload: dict) -> None:
 
 def _tensor_manifest(shapes, dtypes) -> list[dict]:
     return [
-        {"shape": list(shape), "dtype": str(dtype)}
+        {"shape": [d if isinstance(d, int) else str(d) for d in shape], "dtype": str(dtype)}
         for shape, dtype in zip(shapes, dtypes, strict=True)
     ]
 
@@ -350,7 +351,15 @@ def _check_tensors(
             raise NotImplementedError(f"mimir backend does not support 0-d tensor {what}s")
 
 
-def _pack_outputs(gm: fx.GraphModule, out_shapes: list[tuple[int, ...]]) -> None:
+def _eval_extent(dim, values: dict[str, int]) -> int:
+    """An output extent at call time: a literal, or a sympy expression over the input symbols."""
+    if not isinstance(dim, torch.SymInt):
+        return int(dim)
+    expr = dim.node.expr
+    return int(expr.subs({symbol: values[str(symbol)] for symbol in expr.free_symbols}))
+
+
+def _pack_outputs(gm: fx.GraphModule, out_shapes: list[tuple], symbolic: bool = False) -> None:
     """Rewrite the graph so it returns a single flat tensor.
 
     Dynamo graphs return a container of tensors. To keep the verified
@@ -373,7 +382,7 @@ def _pack_outputs(gm: fx.GraphModule, out_shapes: list[tuple[int, ...]]) -> None
     else:
         with gm.graph.inserting_before(output):
             flats = [
-                gm.graph.call_function(torch.reshape, (node, (math.prod(shape),)))
+                gm.graph.call_function(torch.reshape, (node, (-1 if symbolic else math.prod(shape),)))
                 for node, shape in zip(nodes, out_shapes)
             ]
             packed = gm.graph.call_function(torch.cat, (flats, 0))
@@ -467,12 +476,24 @@ def mimir_backend(
         if max_fp_iters <= 0:
             raise ValueError("max_fp_iters must be positive")
 
+    arg_is_sym = [isinstance(x, torch.SymInt) for x in example_inputs]
+    tensor_inputs = [x for x, is_sym in zip(example_inputs, arg_is_sym) if not is_sym]
     _check_tensors(
-        example_inputs,
+        tensor_inputs,
         "input",
         allowed_dtypes=(torch.float32, torch.int64),
         allow_scalar=True,
     )
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    sym_inputs = [n.name for n in placeholders if is_sym_placeholder(n)]
+    # Dynamo records the symbolic extents on the placeholders; the example tensors only carry the traced sizes.
+    input_shapes = [
+        tuple(symbol_dim(d) for d in (placeholder_value(n) if placeholder_value(n) is not None else x).shape)
+        for n, x in zip(placeholders, example_inputs)
+        if not is_sym_placeholder(n)
+    ]
+    symbolic = bool(sym_inputs) or any(isinstance(d, str) for shape in input_shapes for d in shape)
+    sym_order = symbol_names(sym_inputs, input_shapes)
     if any(n.op == "get_attr" for n in gm.graph.nodes):
         # Dynamo lifts parameters, buffers, and tensor constants into
         # placeholders; get_attr would need extra trailing-argument marshaling.
@@ -481,39 +502,39 @@ def mimir_backend(
     # Ask PyTorch to expand only the explicitly selected fallback operators.
     # Supported semantic operators, including native_layer_norm, remain intact
     # and map directly to MimIR Torch axioms.
-    gm = _timed(
+    decomposed = _timed(
         timings,
         "decompose",
         lambda: apply_decomposition_policy(gm, example_inputs, decomposition_policy),
     )
+    if decomposed is not gm and symbolic:
+        # make_fx retraces with the traced sizes, which would silently specialize the symbols away.
+        raise NotImplementedError("dynamic shapes are not supported together with fallback decompositions")
+    gm = decomposed
 
     output_node = next(n for n in gm.graph.nodes if n.op == "output")
     container = output_node.args[0]
     example_outs = _output_tensors_from_metadata(container)
     restore = type(container)
 
-    # Shapes are static: one specialization per Dynamo guard set.
-    input_shapes = [tuple(t.shape) for t in example_inputs]
-    input_dtypes = [t.dtype for t in example_inputs]
+    # Static extents are one specialization per Dynamo guard set; symbolic ones are `Nat` parameters.
+    input_dtypes = [t.dtype for t in tensor_inputs]
     _check_tensors(
         example_outs,
         "output",
         allowed_dtypes=(torch.float32, torch.int64),
         allow_scalar=True,
     )
-    out_shapes = [tuple(t.shape) for t in example_outs]
+    out_shapes = [tuple(t.shape) for t in example_outs]  # extents may be SymInt
     out_dtypes = [t.dtype for t in example_outs]
     if len(set(out_dtypes)) != 1:
         raise NotImplementedError(
             "mimir backend requires homogeneous output dtypes for its flat-buffer ABI"
         )
     output_dtype = out_dtypes[0]
-    out_numels = [math.prod(shape) for shape in out_shapes]
-    out_offsets = [sum(out_numels[:i]) for i in range(len(out_numels))]
-    total_numel = sum(out_numels)
     scalar_output = len(out_shapes) == 1 and not out_shapes[0]
 
-    _pack_outputs(gm, out_shapes)
+    _pack_outputs(gm, out_shapes, symbolic)
 
     # The key covers the packed graph, input shapes, and the MimIR install;
     # it also names the exported symbol, so cached libraries are self-contained.
@@ -615,18 +636,15 @@ def mimir_backend(
                 shutil.rmtree(transient_build_dir, ignore_errors=True)
 
     fn = lib[name]
-    # Every tensor parameter, rank 0 included, bufferizes to a pointer.
-    scalar_input = [False for _ in input_shapes]
-    empty_input = [math.prod(shape) == 0 for shape in input_shapes]
+    empty_input = [any(d == 0 for d in shape if isinstance(d, int)) for shape in input_shapes]
     scalar_ctypes = {
         torch.float32: ctypes.c_float,
         torch.int64: ctypes.c_int64,
     }
-    fn.argtypes = [
-        scalar_ctypes[dtype] if is_scalar else ctypes.c_void_p
-        for dtype, is_scalar, is_empty in zip(
-            input_dtypes, scalar_input, empty_input, strict=True
-        )
+    # The symbols come first as `Nat`s, then every tensor, rank 0 included, as a pointer.
+    fn.argtypes = [ctypes.c_uint64] * len(sym_order) + [
+        ctypes.c_void_p
+        for is_empty in empty_input
         # A zero-length MimIR array normalizes to Unit and therefore occupies
         # no slot in the emitted native function signature.
         if not is_empty
@@ -634,16 +652,32 @@ def mimir_backend(
     output_ctype = scalar_ctypes[output_dtype]
     fn.restype = output_ctype if scalar_output else ctypes.POINTER(output_ctype)
 
-    def compiled(*args: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def compiled(*args: torch.Tensor | int) -> tuple[torch.Tensor, ...]:
+        values: dict[str, int] = {}
+        sym_names_iter = iter(sym_inputs)
+        tensors = []
+        for arg, is_sym in zip(args, arg_is_sym, strict=True):
+            if is_sym:
+                values[next(sym_names_iter)] = int(arg)
+            else:
+                tensors.append(arg)
+        for tensor, shape in zip(tensors, input_shapes, strict=True):
+            for extent, dim in zip(tensor.shape, shape, strict=True):
+                if isinstance(dim, str):
+                    values[dim] = int(extent)
+
         # Keep the contiguous buffers referenced until the call returns.
-        buffers = [a.detach().contiguous() for a in args]
-        native_args = [
-            scalar_ctypes[dtype](buffer.item()) if is_scalar else buffer.data_ptr()
-            for buffer, dtype, is_scalar, is_empty in zip(
-                buffers, input_dtypes, scalar_input, empty_input, strict=True
-            )
+        buffers = [a.detach().contiguous() for a in tensors]
+        native_args = [values[name] for name in sym_order] + [
+            buffer.data_ptr()
+            for buffer, is_empty in zip(buffers, empty_input, strict=True)
             if not is_empty
         ]
+        shapes = [tuple(_eval_extent(d, values) for d in shape) for shape in out_shapes]
+        numels = [math.prod(shape) for shape in shapes]
+        offsets = [sum(numels[:i]) for i in range(len(numels))]
+        total_numel = sum(numels)
+
         native_result = fn(*native_args)
         if scalar_output:
             flat = torch.tensor([native_result], dtype=output_dtype)
@@ -655,10 +689,8 @@ def mimir_backend(
             result_address = ctypes.cast(native_result, ctypes.c_void_p).value
             input_addresses = {
                 buffer.data_ptr()
-                for buffer, is_scalar, is_empty in zip(
-                    buffers, scalar_input, empty_input, strict=True
-                )
-                if not is_scalar and not is_empty
+                for buffer, is_empty in zip(buffers, empty_input, strict=True)
+                if not is_empty
             }
             # PE can reduce identity-like graphs to a borrowed input pointer.
             # Only buffers allocated by the generated function belong to libc.
@@ -667,7 +699,7 @@ def mimir_backend(
         # The outputs are disjoint views of one flat buffer.
         return restore(
             flat[offset : offset + numel].reshape(shape)
-            for offset, numel, shape in zip(out_offsets, out_numels, out_shapes)
+            for offset, numel, shape in zip(offsets, numels, shapes)
         )
 
     # Keep the loaded library (and the driver on a cache miss) alive.

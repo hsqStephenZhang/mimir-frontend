@@ -2,6 +2,7 @@ import torch
 from torch import fx
 import mim
 from .operators import OperatorLibrary
+from .symbols import is_sym_placeholder
 from mim._plugins.compile import compile as mim_compile
 from mim._plugins.tensor import tensor as _tensor_dialect
 import operator
@@ -1982,10 +1983,43 @@ class FXGraphTranslator:
             return tensor_type
         return self._rebuild_tensor_type(specialized_dims, elem_type)
 
+    def _abstract_over_domain(self, type_: mim.Def, lam_var: mim.Def, domain_var: mim.Def) -> mim.Def:
+        """Rewrite `type_` from the function's own variable to its domain's: the signature may only mention the latter."""
+        if not type_.has_free_var(lam_var):
+            return type_
+        world = self.world
+        memo: dict[int, mim.Def] = {}
+
+        def abstract(d: mim.Def) -> mim.Def:
+            if d.gid() in memo:
+                return memo[d.gid()]
+            if d.gid() == lam_var.gid():
+                result = domain_var
+            elif not d.has_free_var(lam_var):
+                result = d
+            elif isinstance(d, mim.Extract):
+                result = world.extract(abstract(d.tuple()), abstract(d.index()))
+            elif isinstance(d, mim.App):
+                result = world.app(abstract(d.callee()), abstract(d.arg()))
+            elif isinstance(d, mim.Tuple):
+                n = d.num_projs()
+                result = world.tuple([abstract(d.proj(n, i)) for i in range(n)])
+            else:
+                raise NotImplementedError(f"a result type depending on a symbolic extent through `{d.node_name()}`")
+            memo[d.gid()] = result
+            return result
+
+        parts = self.ops.tensor_type_parts(type_)
+        if parts is None:
+            return abstract(type_)
+        dims, elem_type = parts
+        return self.ops.tensor_type([abstract(dim) for dim in dims], elem_type)
+
     def translate_as_function(self, graph: fx.Graph, input_types: list[mim.Def], name: str = "main", sym_names: list[str] = None) -> mim.Lam:
         placeholders = [node for node in graph.nodes if node.op == "placeholder"]
+        tensor_placeholders = [node for node in placeholders if not is_sym_placeholder(node)]
         param_nodes = [node for node in graph.nodes if node.op == "get_attr"]
-        num_inputs = len(placeholders) + len(param_nodes)
+        num_inputs = len(tensor_placeholders) + len(param_nodes)
         num_sym = len(sym_names) if sym_names else 0
 
         old_sym_map = self.ops.sym_map
@@ -2002,11 +2036,15 @@ class FXGraphTranslator:
             for sym_name, sym_param in zip(sym_names, sigma_sym_params):
                 self.ops.sym_map[sym_name] = sym_param
 
-        for i, tensor_type in enumerate(input_types[num_sym:num_sym + len(placeholders)]):
+        for i, tensor_type in enumerate(input_types[num_sym:num_sym + len(tensor_placeholders)]):
             dom_with_ret.set(num_sym + i, self._specialize_input_type(tensor_type, i))
 
-        for i, param_type in enumerate(input_types[num_sym + len(placeholders):]):
-            dom_with_ret.set(num_sym + len(placeholders) + i, param_type)
+        for i, param_type in enumerate(input_types[num_sym + len(tensor_placeholders):]):
+            dom_with_ret.set(num_sym + len(tensor_placeholders) + i, param_type)
+
+        # The result type is only known after translation, but a symbolic extent makes the signature dependent,
+        # and reading a parameter's type reduces the whole sigma - so the return slot gets a stand-in until then.
+        dom_with_ret.set(num_params - 1, self.world.cn([self.world.sigma([])]))
 
         lam = self.world.mut_con(dom_with_ret)
         lam.set(name)
@@ -2016,25 +2054,23 @@ class FXGraphTranslator:
             for sym_name, sym_param in zip(sym_names, lam_sym_params):
                 self.ops.sym_map[sym_name] = sym_param
 
-        actual_inputs = [lam.var().proj(num_params, i) for i in range(num_sym, num_sym + num_inputs)]
-        if hasattr(self, "input_shapes"):
-            for input_index, (actual_input, shape) in enumerate(
-                zip(actual_inputs[:len(placeholders)], self.input_shapes)
-            ):
-                sym_names_for_input = self.input_sym_names[input_index]
-                bound_shape = [
-                    self.ops.sym_map[sym_name]
-                    if sym_name is not None else dim
-                    for dim, sym_name in zip(shape, sym_names_for_input)
-                ]
-                self.ops._remember_shape(actual_input, bound_shape)
-        if hasattr(self, "param_shapes"):
-            for actual_input, shape in zip(actual_inputs[len(placeholders):], self.param_shapes):
-                self.ops._remember_shape(actual_input, shape)
+        tensor_inputs = [lam.var().proj(num_params, i) for i in range(num_sym, num_sym + num_inputs)]
+        # A `SymInt` placeholder is the `Nat` parameter of its symbol, not a slot of its own.
+        tensor_args = iter(tensor_inputs[:len(tensor_placeholders)])
+        actual_inputs = [
+            self.ops.sym_map[node.name] if is_sym_placeholder(node) else next(tensor_args)
+            for node in placeholders
+        ]
+        actual_inputs.extend(tensor_inputs[len(tensor_placeholders):])
         result = self.translate(graph, actual_inputs)
         result = self.ops.scalar_value(result)
 
-        dom_with_ret.set(num_params - 1, self.world.cn([result.type()]))
+        components = [dom_with_ret.op(i) for i in range(num_params - 1)]
+        dom_with_ret.unset()
+        for i, component in enumerate(components):
+            dom_with_ret.set(i, component)
+        result_type = self._abstract_over_domain(result.type(), lam.var(), dom_with_ret.var())
+        dom_with_ret.set(num_params - 1, self.world.cn([result_type]))
         ret_cont = lam.var().proj(num_params, num_params - 1)
         lam.app(True, ret_cont, [result])
         lam.externalize()

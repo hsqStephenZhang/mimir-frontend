@@ -12,6 +12,7 @@ from torch import fx
 from mim._plugins.compile import compile as mim_compile
 from mim._plugins.tensor import tensor as mim_tensor
 
+from .symbols import is_sym_placeholder, placeholder_value, symbol_dim, symbol_names
 from .translator import FXGraphTranslator
 
 
@@ -54,10 +55,7 @@ class ShapeEnv:
 def _shape_from_meta_value(value) -> tuple[int | str, ...]:
     if not hasattr(value, "shape"):
         raise TypeError(f"meta['val'] does not have shape: {type(value)}")
-    dims = []
-    for dim in value.shape:
-        dims.append(dim if isinstance(dim, int) else str(dim))
-    return tuple(dims)
+    return tuple(symbol_dim(dim) for dim in value.shape)
 
 
 def shape_to_mimir_dims(
@@ -106,21 +104,21 @@ def tensor_type_from_shape(
 def _infer_input_shapes_from_placeholders(graph: fx.Graph) -> list[Shape]:
     shapes = []
     for node in graph.nodes:
-        if node.op != "placeholder":
+        if node.op != "placeholder" or is_sym_placeholder(node):
             continue
-        if "val" not in node.meta:
+        value = placeholder_value(node)
+        if value is None:
             raise ValueError(f"placeholder {node.name} is missing meta['val']; provide input_shapes explicitly")
-        shapes.append(_shape_from_meta_value(node.meta["val"]))
+        shapes.append(_shape_from_meta_value(value))
     return shapes
 
 
 def _infer_input_dtypes_from_placeholders(graph: fx.Graph) -> list[torch.dtype]:
     dtypes = []
     for node in graph.nodes:
-        if node.op != "placeholder":
+        if node.op != "placeholder" or is_sym_placeholder(node):
             continue
-        value = node.meta.get("val")
-        dtypes.append(getattr(value, "dtype", torch.float32))
+        dtypes.append(getattr(placeholder_value(node), "dtype", torch.float32))
     return dtypes
 
 
@@ -315,6 +313,9 @@ def build_model_function(
     ops = translator.ops
     
     shape_env = ShapeEnv(world)
+    for node in graph.nodes:
+        if is_sym_placeholder(node):
+            shape_env.symbol_def(node.name)
     normalized_input_shapes = [shape_env.normalize_shape(shape) for shape in input_shapes]
     sym_names = list(shape_env.symbol_names)
     input_sym_names = [
